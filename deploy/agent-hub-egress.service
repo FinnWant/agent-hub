@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Hub sandbox egress filter (iptables, owner match on agenthub)
+Documentation=https://github.com/FinnWant/agent-hub
+# Apply before agenthub's user manager starts its rootless Docker, and after ufw sets up.
+After=network-pre.target ufw.service
+Wants=network-pre.target
+Before=user@AGENT_UID.service agent-hub.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/agent-hub-egress apply
+ExecReload=/usr/local/sbin/agent-hub-egress apply
+ExecStop=/usr/local/sbin/agent-hub-egress remove
+
+[Install]
+WantedBy=multi-user.target

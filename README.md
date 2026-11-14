@@ -7,7 +7,7 @@ Each sandbox is a locked-down container with its own workspace volume. An agent 
 in non-interactive mode, behind a pluggable runner) works on a branch inside it; you watch the
 stream live, review the diff, and approve. Nothing is exposed to the public internet.
 
-> **Status:** Phase 0 (preparation). Nothing runnable yet.
+> **Status:** Phase 1 — sandbox API (REST, curl-driven). Web UI comes in phase 2.
 
 ## Architecture
 
@@ -27,6 +27,74 @@ Browser / desktop app ── Tailscale ──► Agent Hub :8090  (FastAPI, syst
 | `desktop/` | Tauri 2 wrapper around the frontend |
 | `images/` | Dockerfiles for sandbox templates (`python`, `node`, `static`) |
 | `deploy/` | Install script, systemd units, egress firewall rules, `env.example` |
+
+## Install
+
+Prerequisites on the server (Ubuntu):
+
+1. Docker Engine from Docker's apt repo, including `docker-ce-rootless-extras`.
+2. A system user with rootless Docker and lingering:
+   ```bash
+   sudo useradd --create-home --shell /bin/bash agenthub
+   sudo loginctl enable-linger agenthub
+   sudo machinectl shell agenthub@ /usr/bin/dockerd-rootless-setuptool.sh install
+   ```
+3. Optional but recommended — let sandboxes be disk-I/O throttled by delegating the `io`
+   cgroup controller to that user (`Delegate=cpu cpuset io memory pids` in
+   `/etc/systemd/system/user@<uid>.service.d/delegate.conf`).
+
+Then:
+
+```bash
+sudo bash deploy/install.sh                       # app, images, egress filter, systemd units
+cd /opt/agent-hub/backend && sudo -u agenthub ../.venv/bin/python -m app.set_password
+sudo systemctl restart agent-hub
+bash deploy/smoke-test.sh                         # phase 1 acceptance checks
+```
+
+Add the API port (`tcp:8090`) to your Tailscale ACL so your devices can reach it.
+
+## Using the API
+
+All requests except `/api/health` and login need the session cookie; requests that change
+anything also need the header `X-Requested-With: agent-hub`.
+
+```bash
+H='X-Requested-With: agent-hub'; API=http://<server>:8090/api
+curl -c jar -H "$H" -H 'Content-Type: application/json' -d '{"password":"..."}' $API/auth/login
+curl -b jar $API/system                                   # host resources, caps, can I start one?
+curl -b jar -H "$H" -H 'Content-Type: application/json' \
+     -d '{"name":"demo","template":"python","memory":"2g"}' $API/sandboxes
+curl -b jar -H "$H" -H 'Content-Type: application/json' \
+     -d '{"cmd":"python3 --version"}' $API/sandboxes/<id>/exec
+curl -b jar -H "$H" -X POST $API/sandboxes/<id>/stop      # .../start
+curl -b jar -H "$H" -X DELETE $API/sandboxes/<id>
+curl -b jar $API/audit
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/health` | Liveness and Docker reachability (no auth) |
+| `POST /api/auth/login` · `logout` · `GET /api/auth/me` | Session |
+| `GET /api/system` | Host CPU/RAM/disk, caps, and why a sandbox can't start right now |
+| `GET /api/templates` | Templates and whether their images are built |
+| `GET` / `POST /api/sandboxes` | List / create (`name`, `template`, `repo_url`, `base_branch`, `memory`, `cpus`) |
+| `GET` / `DELETE /api/sandboxes/{id}` | Detail / destroy (removes the container and its volume) |
+| `POST /api/sandboxes/{id}/start` · `stop` | Lifecycle (start re-checks capacity) |
+| `POST /api/sandboxes/{id}/exec` | Run a command as `agent` in `/workspace` (timeout, output capped) |
+| `GET /api/audit` | Audit log, newest first |
+
+## Development
+
+```bash
+cd backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest              # unit tests, no Docker needed
+```
+
+Integration tests (`-m docker`, run with `bash deploy/integration-test.sh`) use the real rootless daemon as the `agenthub`
+user; see `backend/tests/test_integration_docker.py`. `DEMO_MODE=true` swaps Docker for an
+in-memory fake (log in with `demo` if no password is set).
 
 ## Security model
 
@@ -79,8 +147,8 @@ limiting, fail-closed when no password is set, and an audit log of every action.
 
 ## Roadmap
 
-0. Preparation — Docker, caps, scaffold *(current)*
-1. Sandbox API — templates, lifecycle, limits, egress rules, auth, audit log, systemd
+0. Preparation — Docker, caps, scaffold ✓
+1. Sandbox API — templates, lifecycle, limits, egress rules, auth, audit log, systemd *(current)*
 2. Live terminal and minimal web UI
 3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction
 4. Files, diff review, previews, disk checks, phone layout

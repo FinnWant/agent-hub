@@ -1,0 +1,44 @@
+[Unit]
+Description=Agent Hub (sandboxed coding agents)
+Documentation=https://github.com/FinnWant/agent-hub
+After=network-online.target user@AGENT_UID.service agent-hub-egress.service
+Wants=network-online.target
+# Fail closed: no egress filter (or no rootless Docker) means no Agent Hub.
+Requires=user@AGENT_UID.service agent-hub-egress.service
+
+[Service]
+Type=simple
+User=agenthub
+Group=agenthub
+WorkingDirectory=/opt/agent-hub/backend
+EnvironmentFile=/opt/agent-hub/.env
+Environment=XDG_RUNTIME_DIR=/run/user/AGENT_UID
+ExecStart=/opt/agent-hub/.venv/bin/python -m app.serve
+Restart=on-failure
+RestartSec=5
+
+# Hardening. The service only needs its data dir (rw) and the rootless Docker socket
+# (connecting to a socket works on a read-only mount).
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/agent-hub/data
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
