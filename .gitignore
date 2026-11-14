@@ -1,0 +1,39 @@
+# Secrets — never commit
+.env
+.env.*
+!deploy/env.example
+*.pem
+*.key
+secrets/
+
+# Private planning notes (contain host/network details)
+AGENT_HUB_HANDOFF.md
+
+# Local state
+*.db
+*.sqlite3
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Tauri / Rust
+desktop/src-tauri/target/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
