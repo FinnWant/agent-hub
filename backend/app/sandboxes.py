@@ -194,6 +194,16 @@ class SandboxService:
                       detail={"cmd": shown[:200], "exit_code": result.exit_code})
         return result
 
+    def update_settings(self, sandbox_id: str, ip: str, *, allow_push: bool | None = None) -> Sandbox:
+        sb = self.get(sandbox_id)
+        changes = {}
+        if allow_push is not None and allow_push != sb.allow_push:
+            changes["allow_push"] = allow_push
+        if changes:
+            self.db.update_sandbox(sb, **changes)
+            self.db.audit(ip, "sandbox.settings", sb.id, detail=changes)
+        return sb
+
     # ---- terminals -----------------------------------------------------------
 
     def reserve_terminal(self, sandbox_id: str, ip: str) -> Sandbox:

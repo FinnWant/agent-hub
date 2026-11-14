@@ -66,7 +66,7 @@ class Settings:
     # Docker: the agenthub user's rootless daemon.
     docker_host: str = os.getenv("DOCKER_HOST", "")
     network_name: str = os.getenv("SANDBOX_NETWORK", "agent-sandboxes")
-    image_version: str = os.getenv("IMAGE_VERSION", "1")
+    image_version: str = os.getenv("IMAGE_VERSION", "2")
     # "runc" today; "runsc" (gVisor) later is a one-line change.
     container_runtime: str = os.getenv("CONTAINER_RUNTIME", "")
 
@@ -101,6 +101,22 @@ class Settings:
     # Browser terminals (docker exec with a TTY, one shell per WebSocket)
     max_terminals: int = _int("MAX_TERMINALS", 4)
     terminal_idle_timeout: int = _int("TERMINAL_IDLE_TIMEOUT", 3600)
+
+    # Agent runs
+    run_timeout_default: int = _int("RUN_TIMEOUT_DEFAULT", 30 * 60)
+    run_timeout_max: int = _int("RUN_TIMEOUT_MAX", 4 * 60 * 60)
+    run_max_turns_default: int = _int("RUN_MAX_TURNS_DEFAULT", 50)
+    run_max_turns_max: int = _int("RUN_MAX_TURNS_MAX", 500)
+    run_max_events: int = _int("RUN_MAX_EVENTS", 20_000)  # per run; later output is dropped
+    agent_model: str = os.getenv("AGENT_MODEL", "")  # empty = the CLI's default model
+    git_author_name: str = os.getenv("AGENT_GIT_NAME", "Agent Hub")
+    git_author_email: str = os.getenv("AGENT_GIT_EMAIL", "agent-hub@users.noreply.github.com")
+
+    # Secrets (only in .env, mode 600; set with: python -m app.set_secret). Never sent to the
+    # browser and redacted from every stored or streamed log. The Claude token is passed to the
+    # agent process only; the GitHub token never enters a sandbox (clone/push happen host-side).
+    claude_code_oauth_token: str = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "")
+    github_token: str = os.getenv("GITHUB_TOKEN", "")
 
     # Built web UI (frontend/dist); served at / when present.
     frontend_dir: Path = Path(os.getenv("FRONTEND_DIR", str(Path(__file__).resolve().parents[2] / "frontend" / "dist")))

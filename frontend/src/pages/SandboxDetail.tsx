@@ -1,14 +1,14 @@
-import { useState } from "react";
-import { api, ApiError, type Sandbox } from "../lib/api";
+import { useEffect, useState } from "react";
+import { api, ApiError, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago, bytes, repoLabel } from "../lib/format";
 import { navigate, useTitle } from "../lib/router";
 import { usePoll } from "../lib/usePoll";
 import { Dialog, Icon, StatusBadge, useToast } from "../components/ui";
 import Terminal from "../components/Terminal";
+import Runs from "../components/Runs";
 
-type Tab = "terminal" | "settings";
+type Tab = "runs" | "terminal" | "settings";
 const LATER: { label: string; phase: number }[] = [
-  { label: "Runs", phase: 3 },
   { label: "Files", phase: 4 },
   { label: "Changes", phase: 4 },
   { label: "Preview", phase: 4 },
@@ -16,7 +16,12 @@ const LATER: { label: string; phase: number }[] = [
 
 export default function SandboxDetail({ id }: { id: string }) {
   const { data: sb, error, reload } = usePoll(() => api.sandbox(id), 5000, [id]);
-  const [tab, setTab] = useState<Tab>("terminal");
+  const { data: system } = usePoll(api.system, 15000);
+  const [tab, setTab] = useState<Tab>("runs");
+  const [termOpened, setTermOpened] = useState(false); // connect only once the tab is used
+  useEffect(() => {
+    if (tab === "terminal") setTermOpened(true);
+  }, [tab]);
   const [busy, setBusy] = useState(false);
   const [destroying, setDestroying] = useState(false);
   const toast = useToast();
@@ -88,6 +93,9 @@ export default function SandboxDetail({ id }: { id: string }) {
       )}
 
       <div className="tabs" role="tablist">
+        <button className="tab" role="tab" aria-selected={tab === "runs"} onClick={() => setTab("runs")}>
+          Runs
+        </button>
         <button className="tab" role="tab" aria-selected={tab === "terminal"} onClick={() => setTab("terminal")}>
           <Icon name="terminal" size={14} /> Terminal
         </button>
@@ -102,11 +110,16 @@ export default function SandboxDetail({ id }: { id: string }) {
         </button>
       </div>
 
-      {/* Kept mounted while on Settings so the shell survives a tab switch. */}
-      <div style={{ display: tab === "terminal" ? "flex" : "none", flex: 1, minHeight: 0 }}>
-        <Terminal sandboxId={sb.id} running={running} />
-      </div>
-      {tab === "settings" && <Settings sb={sb} onDestroy={() => setDestroying(true)} />}
+      {tab === "runs" && <Runs sb={sb} system={system} />}
+      {/* Kept mounted on other tabs so the shell survives a tab switch. */}
+      {termOpened && (
+        <div style={{ display: tab === "terminal" ? "flex" : "none", flex: 1, minHeight: 0 }}>
+          <Terminal sandboxId={sb.id} running={running} />
+        </div>
+      )}
+      {tab === "settings" && (
+        <Settings sb={sb} system={system} onChanged={reload} onDestroy={() => setDestroying(true)} />
+      )}
 
       {destroying && (
         <DestroyDialog sb={sb} onClose={() => setDestroying(false)}
@@ -119,9 +132,42 @@ export default function SandboxDetail({ id }: { id: string }) {
   );
 }
 
-function Settings({ sb, onDestroy }: { sb: Sandbox; onDestroy: () => void }) {
+function Settings({ sb, system, onChanged, onDestroy }: {
+  sb: Sandbox;
+  system: SystemInfo | null;
+  onChanged: () => void;
+  onDestroy: () => void;
+}) {
+  const toast = useToast();
+  const [saving, setSaving] = useState(false);
+  const hasToken = system?.agent.github_token ?? false;
+  const canPush = !!sb.repo_url && hasToken;
+  const togglePush = async () => {
+    setSaving(true);
+    try {
+      await api.updateSandbox(sb.id, { allow_push: !sb.allow_push });
+      onChanged();
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <div style={{ maxWidth: 720 }}>
+      <div className="card toggle-row" style={{ marginBottom: 16 }}>
+        <div>
+          <strong id="push-label">Push agent branches to GitHub</strong>
+          <p>
+            After a successful run, push its <span className="mono">agent/&lt;run-id&gt;</span> branch to the
+            repository. Never <span className="mono">main</span>, never forced; the GitHub token stays on the server.
+            {!sb.repo_url && " This sandbox has no repository."}
+            {sb.repo_url && !hasToken && " No GitHub token is set (python -m app.set_secret github)."}
+          </p>
+        </div>
+        <button className="toggle" role="switch" aria-checked={sb.allow_push} aria-labelledby="push-label"
+          disabled={saving || (!canPush && !sb.allow_push)} onClick={togglePush} />
+      </div>
       <dl className="card kv">
         <dt>Template</dt><dd>{sb.template}</dd>
         <dt>Memory</dt><dd>{bytes(sb.memory)} (no swap)</dd>

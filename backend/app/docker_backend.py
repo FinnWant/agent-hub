@@ -16,7 +16,8 @@ from typing import Any, Protocol
 from . import config
 from .db import Sandbox
 from .templates import Template
-from .terminal import DockerTerminal, FakeTerminal, TerminalSession, unix_socket_path
+from .dockerio import ExecStream, attach_exec, tar_one, unix_socket_path, untar_one
+from .terminal import DockerTerminal, FakeTerminal, TerminalSession
 
 MANAGED_LABEL = "agent-hub.managed"
 SANDBOX_LABEL = "agent-hub.sandbox-id"
@@ -94,7 +95,11 @@ class Backend(Protocol):
     def stop(self, container_id: str) -> None: ...
     def remove(self, container_id: str | None, volume: str) -> None: ...
     def status(self, container_id: str) -> str: ...
-    def exec(self, container_id: str, cmd: str | list[str], timeout: int) -> ExecResult: ...
+    def exec(self, container_id: str, cmd: str | list[str], timeout: int,
+             env: dict[str, str] | None = None) -> ExecResult: ...
+    async def exec_stream(self, container_id: str, argv: list[str], env: dict[str, str]) -> Any: ...
+    def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None: ...
+    def get_file(self, container_id: str, path: str, max_size: int) -> bytes: ...
     async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession: ...
 
 
@@ -174,14 +179,50 @@ class DockerBackend:
         c = self._managed(container_id)
         return "missing" if c is None else c.status
 
-    def exec(self, container_id: str, cmd: str | list[str], timeout: int) -> ExecResult:
+    def _running(self, container_id: str):
         c = self._managed(container_id)
         if c is None or c.status != "running":
             raise BackendError("Sandbox is not running")
+        return c
+
+    def exec(self, container_id: str, cmd: str | list[str], timeout: int,
+             env: dict[str, str] | None = None) -> ExecResult:
+        c = self._running(container_id)
         code, out = c.exec_run(exec_argv(cmd, timeout), user=SANDBOX_USER, workdir=WORKDIR,
-                               stdout=True, stderr=True)
+                               stdout=True, stderr=True, environment=env)
         text, truncated = _limit(out or b"")
         return ExecResult(exit_code=code, output=text, truncated=truncated, timed_out=code in (124, 137))
+
+    async def exec_stream(self, container_id: str, argv: list[str], env: dict[str, str]) -> ExecStream:
+        import asyncio
+
+        c = await asyncio.to_thread(self._running, container_id)
+        api = self.client.api
+        ex = await asyncio.to_thread(api.exec_create, c.id, argv, stdout=True, stderr=True, stdin=False,
+                                     tty=False, user=SANDBOX_USER, workdir=WORKDIR, environment=env)
+        reader, writer = await attach_exec(api.api_version, unix_socket_path(config.settings.docker_host),
+                                           ex["Id"], tty=False)
+        return ExecStream(api, ex["Id"], reader, writer)
+
+    def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None:
+        if not self._running(container_id).put_archive(directory, tar_one(name, data)):
+            raise BackendError(f"Couldn't copy {name} into the sandbox")
+
+    def get_file(self, container_id: str, path: str, max_size: int) -> bytes:
+        c = self._running(container_id)
+        try:
+            bits, _ = c.get_archive(path)
+        except self._docker.errors.NotFound as e:
+            raise BackendError(f"{path} not found in the sandbox") from e
+        raw, limit = bytearray(), max_size + 2**20  # tar headers and padding
+        for chunk in bits:
+            raw += chunk
+            if len(raw) > limit:
+                raise BackendError(f"{path} is larger than {max_size} bytes")
+        try:
+            return untar_one(bytes(raw), max_size)
+        except ValueError as e:
+            raise BackendError(str(e)) from e
 
     async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession:
         import asyncio
@@ -206,6 +247,12 @@ class FakeBackend:
         self.created_specs: list[dict[str, Any]] = []
         self.fail_next_start: str | None = None
         self.terminals: list[FakeTerminal] = []
+        self.files: dict[tuple[str, str], bytes] = {}
+        self.exec_calls: list[tuple[list[str] | str, dict[str, str] | None]] = []
+        self.exec_replies: list[tuple[str, ExecResult]] = []  # (substring of the command, reply)
+        self.stream_calls: list[tuple[list[str], dict[str, str]]] = []
+        self.stream_script: list[tuple[float, int, bytes]] = []  # (delay, stream, data)
+        self.stream_exit_code = 0
 
     def ping(self) -> bool:
         return True
@@ -257,12 +304,36 @@ class FakeBackend:
         c = self._managed(container_id)
         return "missing" if c is None else c["status"]
 
-    def exec(self, container_id: str, cmd: str | list[str], timeout: int) -> ExecResult:
+    def _running(self, container_id: str) -> dict[str, Any]:
         c = self._managed(container_id)
         if c is None or c["status"] != "running":
             raise BackendError("Sandbox is not running")
+        return c
+
+    def exec(self, container_id: str, cmd: str | list[str], timeout: int,
+             env: dict[str, str] | None = None) -> ExecResult:
+        self._running(container_id)
+        self.exec_calls.append((cmd, env))
         shown = cmd if isinstance(cmd, str) else shlex.join(cmd)
+        for needle, reply in self.exec_replies:
+            if needle in shown:
+                return reply
         return ExecResult(exit_code=0, output=f"(demo) $ {shown}\n", truncated=False, timed_out=False)
+
+    async def exec_stream(self, container_id: str, argv: list[str], env: dict[str, str]) -> FakeExecStream:
+        self._running(container_id)
+        self.stream_calls.append((argv, env))
+        return FakeExecStream(list(self.stream_script), self.stream_exit_code)
+
+    def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None:
+        self._running(container_id)
+        self.files[(container_id, f"{directory.rstrip('/')}/{name}")] = data
+
+    def get_file(self, container_id: str, path: str, max_size: int) -> bytes:
+        self._running(container_id)
+        if (container_id, path) not in self.files:
+            raise BackendError(f"{path} not found in the sandbox")
+        return self.files[(container_id, path)]
 
     async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession:
         c = self._managed(container_id)
@@ -272,3 +343,28 @@ class FakeBackend:
         await term.resize(cols, rows)
         self.terminals.append(term)
         return term
+
+
+class FakeExecStream:
+    def __init__(self, script: list[tuple[float, int, bytes]], code: int) -> None:
+        import asyncio
+
+        self.script = script
+        self.code = code
+        self.closed = asyncio.Event()
+
+    async def chunks(self):
+        import asyncio
+
+        for delay, stream, data in self.script:
+            try:
+                await asyncio.wait_for(self.closed.wait(), timeout=delay)
+                return
+            except TimeoutError:
+                yield stream, data
+
+    async def exit_code(self) -> int | None:
+        return None if self.closed.is_set() else self.code
+
+    def close(self) -> None:
+        self.closed.set()

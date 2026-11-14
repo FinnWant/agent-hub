@@ -1,9 +1,7 @@
 """Interactive shells for the browser terminal.
 
-`DockerTerminal` runs `bash -l` as the sandbox user through `docker exec` with a TTY. The exec
-stream is opened with a raw, asyncio-native HTTP upgrade on the Docker socket (rather than the
-docker SDK's blocking socket), so reads and writes never tie up a thread and no bytes are lost
-to an HTTP read-ahead buffer.
+`DockerTerminal` runs `bash -l` as the sandbox user through `docker exec` with a TTY, attached
+with `dockerio.attach_exec` (asyncio-native, so no thread is tied up per terminal).
 
 Docker has no "kill exec" call, and closing the stream doesn't reliably end the shell, so each
 shell gets a unique argv[0] tag and `close()` kills its whole session (the shell and anything
@@ -13,10 +11,10 @@ it started) from inside the container.
 from __future__ import annotations
 
 import asyncio
-import json
 import secrets
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+
+from .dockerio import attach_exec, unix_socket_path  # noqa: F401  (re-exported)
 
 SHELL_ENV = ["TERM=xterm-256color", "COLORTERM=truecolor", "LANG=C.UTF-8"]
 READ_CHUNK = 64 * 1024
@@ -42,13 +40,6 @@ def kill_argv(tag: str) -> list[str]:
     return ["sh", "-c", f"for p in $(pgrep -f '^{tag}( |$)'); do pkill -KILL -s \"$p\"; done; true"]
 
 
-def unix_socket_path(docker_host: str) -> str:
-    u = urlsplit(docker_host or "unix:///var/run/docker.sock")
-    if u.scheme != "unix":
-        raise ValueError("The browser terminal needs a unix:// DOCKER_HOST")
-    return u.path
-
-
 class DockerTerminal:
     def __init__(self, api: Any, container_id: str, socket_path: str, user: str, workdir: str) -> None:
         self.api = api  # docker.APIClient, for the (blocking) create/resize/kill calls
@@ -67,19 +58,8 @@ class DockerTerminal:
             self.api.exec_create, self.container_id, shell_argv(self.tag), stdin=True, tty=True,
             user=self.user, workdir=self.workdir, environment=SHELL_ENV)
         self.exec_id = ex["Id"]
-        reader, writer = await asyncio.open_unix_connection(self.socket_path)
-        body = json.dumps({"Detach": False, "Tty": True, "ConsoleSize": [rows, cols]}).encode()
-        writer.write(
-            f"POST /v{self.api.api_version}/exec/{self.exec_id}/start HTTP/1.1\r\n"
-            "Host: docker\r\nContent-Type: application/json\r\n"
-            "Connection: Upgrade\r\nUpgrade: tcp\r\n"
-            f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
-        await writer.drain()
-        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=15)
-        status = head.split(b"\r\n", 1)[0]
-        if b" 101 " not in status and b" 200 " not in status:
-            writer.close()
-            raise RuntimeError(f"Docker refused the terminal: {status.decode(errors='replace')}")
+        reader, writer = await attach_exec(self.api.api_version, self.socket_path, self.exec_id,
+                                           tty=True, size=(cols, rows))
         self._reader, self._writer = reader, writer
         await self.resize(cols, rows)
 

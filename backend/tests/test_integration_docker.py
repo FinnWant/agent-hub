@@ -112,3 +112,104 @@ def test_terminal_shell_runs_as_agent_and_is_killed_on_close(real):
     procs = svc.exec(sb.id, ["ps", "-eo", "pid,args"], 15, "test").output
     assert left.output.strip() == "", f"shell or its children survived close():\n{procs}"
     assert "sleep infinity" in procs  # the sandbox itself is untouched
+
+
+# ---------------------------------------------------------------------------
+# Agent runs (phase 3)
+# ---------------------------------------------------------------------------
+
+def _manager(svc):
+    from app.runners import ClaudeCodeRunner, ScriptRunner
+    from app.runs import RunManager
+    from app.workspace import GitWorkspace
+
+    return RunManager(svc.db, svc, {"script": ScriptRunner(svc.backend),
+                                    "claude-code": ClaudeCodeRunner(svc.backend)}, GitWorkspace(svc.backend))
+
+
+def _sandbox(svc, created, name):
+    sb = svc.create(name=name, template="python", repo_url=None, base_branch=None,
+                    memory=1 * 2**30, cpus=1, ip="test")
+    created.append(sb.id)
+    assert sb.state == "running", sb.error
+    return sb
+
+
+def test_claude_code_is_installed(real):
+    svc, created = real
+    sb = _sandbox(svc, created, "cli")
+    r = svc.exec(sb.id, "claude --version && stat -c '%U %a' /usr/local/bin/claude", 60, "test")
+    assert r.exit_code == 0 and "2.1.315" in r.output and "root 755" in r.output, r.output
+
+
+def test_script_run_streams_and_commits(real):
+    import asyncio
+
+    svc, created = real
+    sb = _sandbox(svc, created, "run-ok")
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="for i in 1 2 3; do echo step $i; sleep 0.2; done; "
+                      "echo hello > hello.txt; echo oops >&2", runner="script", timeout=60, max_turns=1, ip="t")
+    asyncio.run(runs._execute(run))
+    done = svc.db.get_run(run.id)
+    assert done.state == "succeeded" and done.exit_code == 0 and done.commit_sha, done
+    texts = [(e.get("kind"), e.get("text")) for e in svc.db.run_events(run.id)]
+    assert ("stdout", "step 3") in texts and ("stderr", "oops") in texts
+    r = svc.exec(sb.id, f"git log -1 --format=%s {done.branch} && git show --stat {done.branch} | grep hello.txt",
+                 30, "t")
+    assert r.exit_code == 0 and f"Agent run {run.id}" in r.output, r.output
+
+
+def test_cancel_and_timeout_leave_nothing_running(real):
+    import asyncio
+
+    svc, created = real
+    sb = _sandbox(svc, created, "run-stop")
+    runs = _manager(svc)
+    script = "echo started; sleep 600 & sleep 600"
+
+    async def cancel_after_start():
+        run = runs.create(sandbox_id=sb.id, prompt=script, runner="script", timeout=600, max_turns=1, ip="t")
+        task = runs.launch(run)
+        for _ in range(100):
+            if any(e.get("text") == "started" for e in svc.db.run_events(run.id)):
+                break
+            await asyncio.sleep(0.1)
+        await runs.cancel(run.id, "t")
+        await asyncio.wait_for(task, 30)
+        return run.id
+
+    rid = asyncio.run(cancel_after_start())
+    assert svc.db.get_run(rid).state == "cancelled"
+    left = svc.exec(sb.id, ["sh", "-c", "pgrep -af '^sleep 600' || true"], 15, "t").output.strip()
+    assert left == "", f"cancel left processes: {left}"
+
+    run = runs.create(sandbox_id=sb.id, prompt=script, runner="script", timeout=3, max_turns=1, ip="t")
+    asyncio.run(runs._execute(run))
+    assert svc.db.get_run(run.id).state == "timed_out"
+    left = svc.exec(sb.id, ["sh", "-c", "pgrep -af '^sleep 600' || true"], 15, "t").output.strip()
+    assert left == "", f"timeout left processes: {left}"
+
+
+def test_real_claude_code_run(real):
+    """One small real run with your Claude token (skipped if none is configured)."""
+    import asyncio
+    import json
+
+    from app import config
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    sb = _sandbox(svc, created, "run-claude")
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="Create a file named hello.txt containing exactly the word hi. "
+                      "Do nothing else.", runner="claude-code", timeout=300, max_turns=5, ip="t")
+    asyncio.run(runs._execute(run))
+    done = svc.db.get_run(run.id)
+    evs = svc.db.run_events(run.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    assert done.commit_sha and done.num_turns
+    assert config.settings.claude_code_oauth_token not in json.dumps(evs)
+    r = svc.exec(sb.id, f"git show {done.branch}:hello.txt", 30, "t")
+    assert r.output.strip() == "hi", r.output

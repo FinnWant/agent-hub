@@ -231,6 +231,9 @@ function SandboxList({
                 <div className="row-sub">
                   <span className="mono">{sb.template}</span>
                   {repo && <> · {repo}</>}
+                  {sb.last_run && (
+                    <> · last run <span className={`run-text-${sb.last_run.state}`}>{sb.last_run.state.replace("_", " ")}</span></>
+                  )}
                   {sb.state !== "running" && (
                     <span style={{ color: sb.state === "error" ? "var(--status-danger)" : undefined }}>
                       {" · "}{sb.state === "error" && sb.error ? sb.error : sb.state}

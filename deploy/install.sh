@@ -45,6 +45,8 @@ env_set() {
 env_default() { [[ -n $(env_get "$1") ]] || env_set "$1" "$2"; }
 
 env_set DB_PATH "$APP_DIR/data/agent-hub.db"
+# The image version follows the Dockerfiles (images/VERSION), not a user setting.
+env_set IMAGE_VERSION "$(cat "$APP_DIR/images/VERSION")"
 env_set DOCKER_HOST "unix://$SOCK"
 env_default SESSION_SECRET "$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 grep -qE '^ADMIN_PASSWORD_HASH=' "$ENV_FILE" || echo "ADMIN_PASSWORD_HASH=" >> "$ENV_FILE"
@@ -84,7 +86,7 @@ systemctl restart agent-hub-egress.service
 
 echo "==> Building sandbox images (first run takes a few minutes)"
 VERSION=$(env_get IMAGE_VERSION); VERSION=${VERSION:-1}
-for dir in "$APP_DIR"/images/*/; do
+for dir in "$APP_DIR"/images/*/; do  # python, node, static
   name=$(basename "$dir")
   echo "    agent-hub/$name:$VERSION"
   as_agent docker build -q -t "agent-hub/$name:$VERSION" "$dir" >/dev/null
@@ -115,5 +117,10 @@ If you haven't yet:
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_password
        sudo systemctl restart agent-hub
   - in the Tailscale admin console, add "tcp:$PORT" to the ACL grant for this server.
+  - for agent runs, store the Claude token (from `claude setup-token`) and, to push
+    branches, a fine-grained GitHub token:
+       cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_secret claude
+       cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_secret github
+       sudo systemctl restart agent-hub
 Checks: bash deploy/smoke-test.sh (API) and bash deploy/integration-test.sh (Docker).
 EOF

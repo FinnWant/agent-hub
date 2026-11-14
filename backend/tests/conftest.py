@@ -10,7 +10,10 @@ from app.capacity import HostState
 from app.db import Database
 from app.docker_backend import FakeBackend
 from app.main import app
+from app.runners import DemoRunner, ScriptRunner
+from app.runs import RunManager
 from app.sandboxes import SandboxService
+from app.workspace import FakeWorkspace
 from app.templates import TEMPLATES
 
 PASSWORD = "correct horse battery"
@@ -63,11 +66,24 @@ def svc(backend, host) -> SandboxService:
 
 
 @pytest.fixture
-def client(svc):
+def workspace() -> FakeWorkspace:
+    return FakeWorkspace()
+
+
+@pytest.fixture
+def runs(svc, backend, workspace) -> RunManager:
+    return RunManager(svc.db, svc, {"claude-code": DemoRunner(scale=0.01), "script": ScriptRunner(backend)},
+                      workspace)
+
+
+@pytest.fixture
+def client(svc, runs):
     app.state.service = svc
+    app.state.runs = runs
     with TestClient(app) as c:
         yield c
     del app.state.service
+    del app.state.runs
 
 
 @pytest.fixture

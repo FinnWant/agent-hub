@@ -7,7 +7,8 @@ Each sandbox is a locked-down container with its own workspace volume. An agent 
 in non-interactive mode, behind a pluggable runner) works on a branch inside it; you watch the
 stream live, review the diff, and approve. Nothing is exposed to the public internet.
 
-> **Status:** Phase 2 — web UI with a live terminal in each sandbox. Agent runs come in phase 3.
+> **Status:** Phase 3 — agent runs: give Claude Code a task in a sandbox, watch it live, get a
+> commit on an `agent/<run-id>` branch. Files, diff review and previews come in phase 4.
 
 ## Architecture
 
@@ -57,15 +58,38 @@ bash deploy/integration-test.sh                   # Docker integration tests, as
 Add the port (`tcp:8090`) to your Tailscale ACL so your devices can reach it, then open
 `http://<server>:8090` in a browser on your tailnet.
 
+### Agent credentials
+
+```bash
+claude setup-token        # on any machine signed in to your Claude subscription; copy the token
+cd /opt/agent-hub/backend
+sudo -u agenthub ../.venv/bin/python -m app.set_secret claude    # paste it (input is hidden)
+sudo -u agenthub ../.venv/bin/python -m app.set_secret github    # optional, to push branches
+sudo systemctl restart agent-hub
+```
+
+- **Claude:** `claude setup-token` creates a one-year token for your subscription. Anthropic's
+  terms allow it for your own use, so keep Agent Hub single-user. Revoke it from your Claude
+  account settings if you think it leaked.
+- **GitHub:** create a *fine-grained* token at GitHub → Settings → Developer settings, with
+  **only the repositories** agents may work on and **Contents: read and write**. Turn on branch
+  protection for `main` in those repositories as a second line of defence. Pushing is off per
+  sandbox until you enable it in the sandbox's Settings tab.
+
 ## Web UI
 
 - **Sandboxes:** host memory, sandbox budget, CPU and disk at a glance, with the reasons a new
   sandbox can't start right now (caps, memory reserve, disk floor). Create (<kbd>N</kbd>),
   start, stop.
+- **Sandbox → Runs:** describe a task and start Claude Code (<kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>).
+  The log streams live (messages, tool calls, results, cost and turns); cancel at any time.
+  Each run gets its own branch `agent/<run-id>` from the sandbox's base branch, and whatever
+  the agent leaves is committed there. Run history is kept per sandbox.
 - **Sandbox → Terminal:** a real shell (`bash -l` as `agent` in `/workspace`) over a
   WebSocket, rendered with xterm.js. Resizes with the window; the shell and everything it
   started are killed when you close the tab or reconnect. Idle shells close after an hour.
-- **Sandbox → Settings:** limits and isolation summary; destroy (type the name to confirm).
+- **Sandbox → Settings:** push agent branches to GitHub (off by default), limits and isolation
+  summary, destroy (type the name to confirm).
 - **Audit log:** every login, sandbox action and terminal session, filterable.
 
 The UI follows the *Kiln* design system (dark slate, matte surfaces, ember reserved for the
@@ -100,6 +124,10 @@ curl -b jar $API/audit
 | `POST /api/sandboxes/{id}/start` · `stop` | Lifecycle (start re-checks capacity) |
 | `POST /api/sandboxes/{id}/exec` | Run a command as `agent` in `/workspace` (timeout, output capped) |
 | `WS /api/sandboxes/{id}/terminal?cols=&rows=` | Interactive shell: binary frames both ways, `{"type":"resize","cols","rows"}` text frames |
+| `PATCH /api/sandboxes/{id}` | Settings: `allow_push` |
+| `GET` / `POST /api/sandboxes/{id}/runs` | Run history / start a run (`prompt`, `timeout_minutes`, `max_turns`) |
+| `GET /api/runs/{id}` · `GET /api/runs/{id}/log` · `POST /api/runs/{id}/cancel` | Run detail, stored events, cancel |
+| `WS /api/runs/{id}/events` | Backlog then live events, batched every 150 ms, as `{"events": [...]}` |
 | `GET /api/audit` | Audit log, newest first |
 
 ## Development
@@ -118,6 +146,34 @@ so the whole UI works without Docker (log in with `demo`).
 
 Integration tests (`-m docker`, run with `bash deploy/integration-test.sh`) use the real rootless daemon as the `agenthub`
 user; see `backend/tests/test_integration_docker.py`.
+
+## Agent runs
+
+```
+queued → running → succeeded | failed | cancelled | timed_out
+```
+
+1. **Workspace.** If the sandbox has a repository and no clone yet, Agent Hub clones it *on the
+   host* (with the GitHub token if set), bundles it, and copies the bundle in. No repository:
+   `/workspace` becomes a fresh git repo. A dirty working tree is refused, so every run starts
+   clean.
+2. **Branch** `agent/<run-id>` from the base branch.
+3. **Agent:** `claude -p` with `--output-format stream-json`, `--max-turns`, and
+   `--permission-mode bypassPermissions` (the sandbox is the permission boundary), as user
+   `agent` in its own process session. Only `CLAUDE_CODE_OAUTH_TOKEN` is added to its
+   environment. The CLI is a pinned, checksum-verified release in a root-owned path, with
+   auto-update and telemetry off.
+4. **Limits:** one run per sandbox; wall-clock timeout (default 30 min) and cancel both kill the
+   agent's whole process session; turn limit; the memory reserve is re-checked before a run.
+5. **Commit** everything the agent left on the branch (also after cancel or timeout, so the
+   work can be reviewed).
+6. **Push** (only if enabled for the sandbox, the run succeeded, and the repository is on
+   github.com): the branch is bundled in the sandbox, copied out, fetched into a fresh repo on
+   the host and pushed by URL, exactly `agent/<run-id>`, never forced. Nothing the agent wrote
+   (hooks, `.git/config`, credential helpers) runs alongside the token.
+
+Every log line is redacted for known secrets (and common token shapes) before it is stored or
+streamed.
 
 ## Security model
 
@@ -147,10 +203,12 @@ Agent Hub runs code written by an AI model, which may in turn have read untruste
 6 GB total sandbox memory (4 GB max each), a 3 GB free-memory reserve checked before every
 start, disk I/O limits, and a free-disk floor for new runs.
 
-**Credentials** — secrets live only in a mode-600 `.env` and the agent process environment,
-are redacted from logs and never sent to the frontend. GitHub access is scoped to selected
-repositories; agents may push `agent/*` branches but never to `main`/`master` and never
-force-push.
+**Credentials** — secrets live only in a mode-600 `.env`; the API reports only whether they
+are set. The Claude token goes into the agent process's environment for the length of a run;
+the GitHub token never enters a sandbox (clone and push run on the host). Both are redacted
+from stored and streamed logs. GitHub access is scoped to selected repositories; only
+`agent/<run-id>` branches are pushed, never `main`/`master`, never forced, and only when you
+enable it per sandbox.
 
 **Access** — single admin account (hashed password), `HttpOnly` `SameSite=Strict` session
 cookie, CSRF header on mutating requests, session cookie **and** same-origin `Origin` checks
@@ -165,6 +223,10 @@ action including terminal open/close.
   anything the sandbox can see (including the repo and the model credential) to the
   internet. The sandbox boundary and the network rules limit the blast radius; they do not
   make the agent trustworthy. Review every diff before approving.
+- **The Claude token is visible to the agent.** Its tools inherit the process environment, so
+  a manipulated agent could read the token and send it out. Use a token you can revoke, keep
+  an eye on your usage, and revoke it if a run looks suspicious. (Your GitHub token is not
+  exposed this way.)
 - **Open egress.** Sandboxes may contact any public host. A domain allowlist (egress proxy)
   is planned, not built.
 - **Container escape.** Rootless Docker limits the damage of a kernel or runtime escape to the
@@ -174,8 +236,8 @@ action including terminal open/close.
 
 0. Preparation — Docker, caps, scaffold ✓
 1. Sandbox API — templates, lifecycle, limits, egress rules, auth, audit log, systemd ✓
-2. Live terminal and minimal web UI *(current)*
-3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction
+2. Live terminal and minimal web UI ✓
+3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction *(current)*
 4. Files, diff review, previews, disk checks, phone layout
 5. Tauri desktop app with native notifications
 

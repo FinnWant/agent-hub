@@ -5,6 +5,7 @@ import pytest
 from app.config import parse_size
 from app.docker_backend import MANAGED_LABEL, NotManaged
 from app.sandboxes import TRANSITIONS, InvalidTransition, check_transition
+from app.templates import TEMPLATES
 from tests.conftest import CSRF, GIB
 
 
@@ -118,7 +119,7 @@ def test_system_reports_caps_and_blockers(admin, host):
 
 
 def test_templates_report_build_state(admin, backend):
-    backend.images.discard("agent-hub/node:1")
+    backend.images.discard(TEMPLATES["node"].image)
     built = {t["name"]: t["built"] for t in admin.get("/api/templates").json()}
     assert built == {"python": True, "node": False, "static": True}
     assert create(admin, template="node").status_code == 503

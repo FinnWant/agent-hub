@@ -16,7 +16,40 @@ export interface Sandbox {
   error: string | null;
   created_at: number;
   updated_at: number;
+  allow_push: boolean;
+  last_run?: { id: string; state: RunState; created_at: number; finished_at: number | null } | null;
 }
+
+export type RunState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "timed_out";
+
+export interface Run {
+  id: string;
+  sandbox_id: string;
+  runner: string;
+  prompt: string;
+  state: RunState;
+  branch: string | null;
+  base_branch: string | null;
+  commit_sha: string | null;
+  pushed: boolean;
+  exit_code: number | null;
+  error: string | null;
+  timeout: number;
+  max_turns: number;
+  cost_usd: number | null;
+  num_turns: number | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export type RunEvent = { seq: number; ts: number } & (
+  | { type: "log"; kind: "text" | "tool" | "tool_result" | "system" | "stderr" | "stdout" | "result" | "error";
+      text: string; name?: string; is_error?: boolean }
+  | { type: "status"; state: RunState }
+  | { type: "cost"; cost_usd: number | null; turns: number | null; duration_ms: number | null }
+  | { type: "done"; state: RunState; error: string | null; commit: string | null; branch: string; pushed: boolean }
+);
 
 export interface Template {
   name: string;
@@ -48,6 +81,14 @@ export interface SystemInfo {
   sandboxes: { running: number; memory_used: number };
   can_start_default: boolean;
   blockers: string[];
+  agent: {
+    claude_token: boolean;
+    github_token: boolean;
+    model: string | null;
+    run_timeout_default: number;
+    run_timeout_max: number;
+    run_max_turns_default: number;
+  };
 }
 
 export interface AuditEntry {
@@ -138,9 +179,24 @@ export const api = {
   start: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/start`),
   stop: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/stop`),
   destroy: (id: string) => request<void>("DELETE", `/sandboxes/${encodeURIComponent(id)}`),
+  updateSandbox: (id: string, body: { allow_push?: boolean }) =>
+    request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
+  runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),
+  startRun: (sandboxId: string, body: { prompt: string; timeout_minutes?: number; max_turns?: number }) =>
+    request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
+  run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
+  cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),
   audit: (beforeId?: number, limit = 100) =>
     request<AuditEntry[]>("GET", `/audit?limit=${limit}${beforeId ? `&before_id=${beforeId}` : ""}`),
 };
+
+function wsBase(): string {
+  return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api`;
+}
+
+export function runEventsUrl(id: string): string {
+  return `${wsBase()}/runs/${encodeURIComponent(id)}/events`;
+}
 
 export function terminalUrl(id: string, cols: number, rows: number): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";

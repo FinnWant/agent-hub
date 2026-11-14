@@ -18,10 +18,14 @@ from . import __version__, auth, config
 from .capacity import disk_usage, mem_available, mem_total
 from .config import format_size, parse_size
 from .db import Database, Sandbox
+from .db import Run
 from .docker_backend import Backend, BackendError, DockerBackend, FakeBackend, NotManaged
+from .runners import default_runners
+from .runs import RunManager
 from .sandboxes import SandboxError, SandboxService
 from .templates import TEMPLATES
 from .terminal import TerminalSession
+from .workspace import default_workspace
 
 log = logging.getLogger("agent_hub")
 
@@ -33,12 +37,19 @@ def build_service(backend: Backend | None = None, db: Database | None = None) ->
     return SandboxService(db or Database(s.db_path), backend)
 
 
+def build_runs(svc: SandboxService) -> RunManager:
+    return RunManager(svc.db, svc, default_runners(svc.backend), default_workspace(svc.backend))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not hasattr(app.state, "service"):
         app.state.service = build_service()
     svc: SandboxService = app.state.service
+    if not hasattr(app.state, "runs"):
+        app.state.runs = build_runs(svc)
     svc.reconcile_on_startup()
+    app.state.runs.reconcile_on_startup()
     try:
         svc.backend.ensure_network()
     except Exception as e:  # keep serving so /api/health can report the problem
@@ -88,6 +99,13 @@ def service(request: Request) -> SandboxService:
 
 
 Svc = Annotated[SandboxService, Depends(service)]
+
+
+def run_manager(request: Request) -> RunManager:
+    return request.app.state.runs
+
+
+Runs = Annotated[RunManager, Depends(run_manager)]
 
 
 @app.exception_handler(SandboxError)
@@ -179,6 +197,13 @@ def system(_: Admin, svc: Svc) -> dict:
         "sandboxes": {"running": len(running), "memory_used": used},
         "can_start_default": not blockers,
         "blockers": blockers,
+        # Only whether credentials exist, never their values.
+        "agent": {"claude_token": bool(s.claude_code_oauth_token) or s.demo_mode,
+                  "github_token": bool(s.github_token) or s.demo_mode,
+                  "model": s.agent_model or None,
+                  "run_timeout_default": s.run_timeout_default,
+                  "run_timeout_max": s.run_timeout_max,
+                  "run_max_turns_default": s.run_max_turns_default},
     }
 
 
@@ -193,11 +218,15 @@ def templates(_: Admin, svc: Svc) -> list[dict]:
 # Sandboxes
 # ---------------------------------------------------------------------------
 
-def sandbox_out(sb: Sandbox) -> dict:
+def sandbox_out(sb: Sandbox, runs: RunManager | None = None) -> dict:
     d = sb.to_dict()
     d["memory_human"] = format_size(sb.memory)
     d.pop("volume")
     d.pop("container_id")
+    if runs is not None:
+        last = runs.db.list_runs(sandbox_id=sb.id, limit=1)
+        d["last_run"] = ({"id": last[0].id, "state": last[0].state, "created_at": last[0].created_at,
+                          "finished_at": last[0].finished_at} if last else None)
     return d
 
 
@@ -222,8 +251,8 @@ class CreateSandbox(BaseModel):
 
 
 @app.get("/api/sandboxes")
-def list_sandboxes(_: Admin, svc: Svc) -> list[dict]:
-    return [sandbox_out(sb) for sb in svc.list()]
+def list_sandboxes(_: Admin, svc: Svc, runs: Runs) -> list[dict]:
+    return [sandbox_out(sb, runs) for sb in svc.list()]
 
 
 @app.post("/api/sandboxes", status_code=201)
@@ -236,8 +265,19 @@ def create_sandbox(body: CreateSandbox, _: Admin, request: Request, svc: Svc) ->
 
 
 @app.get("/api/sandboxes/{sandbox_id}")
-def get_sandbox(sandbox_id: str, _: Admin, svc: Svc) -> dict:
-    return sandbox_out(svc.get(sandbox_id))
+def get_sandbox(sandbox_id: str, _: Admin, svc: Svc, runs: Runs) -> dict:
+    return sandbox_out(svc.get(sandbox_id), runs)
+
+
+class SandboxSettings(BaseModel):
+    allow_push: bool | None = None
+
+
+@app.patch("/api/sandboxes/{sandbox_id}")
+def update_sandbox(sandbox_id: str, body: SandboxSettings, _: Admin, request: Request, svc: Svc,
+                   runs: Runs) -> dict:
+    sb = svc.update_settings(sandbox_id, auth.client_ip(request), allow_push=body.allow_push)
+    return sandbox_out(sb, runs)
 
 
 @app.post("/api/sandboxes/{sandbox_id}/start")
@@ -246,13 +286,17 @@ def start_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc) -> dict
 
 
 @app.post("/api/sandboxes/{sandbox_id}/stop")
-def stop_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc) -> dict:
-    return sandbox_out(svc.stop(sandbox_id, auth.client_ip(request)))
+async def stop_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc, runs: Runs) -> dict:
+    ip = auth.client_ip(request)
+    await runs.cancel_for_sandbox(sandbox_id, ip)  # a run can't survive its container
+    return sandbox_out(await asyncio.to_thread(svc.stop, sandbox_id, ip))
 
 
 @app.delete("/api/sandboxes/{sandbox_id}", status_code=204)
-def destroy_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc) -> Response:
-    svc.destroy(sandbox_id, auth.client_ip(request))
+async def destroy_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc, runs: Runs) -> Response:
+    ip = auth.client_ip(request)
+    await runs.cancel_for_sandbox(sandbox_id, ip)
+    await asyncio.to_thread(svc.destroy, sandbox_id, ip)
     return Response(status_code=204)
 
 
@@ -267,6 +311,99 @@ def exec_in_sandbox(sandbox_id: str, body: ExecBody, _: Admin, request: Request,
         raise HTTPException(422, "cmd is empty")
     r = svc.exec(sandbox_id, body.cmd, body.timeout, auth.client_ip(request))
     return {"exit_code": r.exit_code, "output": r.output, "truncated": r.truncated, "timed_out": r.timed_out}
+
+
+# ---------------------------------------------------------------------------
+# Agent runs
+# ---------------------------------------------------------------------------
+
+def run_out(run: Run) -> dict:
+    return run.to_dict()
+
+
+class StartRun(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20_000)
+    runner: str = Field(default="claude-code", max_length=40)
+    timeout_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    max_turns: int | None = Field(default=None, ge=1, le=10_000)
+
+
+@app.get("/api/sandboxes/{sandbox_id}/runs")
+def list_runs(sandbox_id: str, _: Admin, svc: Svc, runs: Runs, limit: int = Query(50, ge=1, le=200)) -> list[dict]:
+    svc.get(sandbox_id)
+    return [run_out(r) for r in runs.db.list_runs(sandbox_id=sandbox_id, limit=limit)]
+
+
+@app.post("/api/sandboxes/{sandbox_id}/runs", status_code=201)
+async def start_run(sandbox_id: str, body: StartRun, _: Admin, request: Request, runs: Runs) -> dict:
+    run = await asyncio.to_thread(
+        runs.create, sandbox_id=sandbox_id, prompt=body.prompt.strip(), runner=body.runner,
+        timeout=body.timeout_minutes * 60 if body.timeout_minutes else None, max_turns=body.max_turns,
+        ip=auth.client_ip(request))
+    runs.launch(run)
+    return run_out(run)
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str, _: Admin, runs: Runs) -> dict:
+    return run_out(runs.get(run_id))
+
+
+@app.get("/api/runs/{run_id}/log")
+def run_log(run_id: str, _: Admin, runs: Runs, after: int = Query(-1, ge=-1)) -> list[dict]:
+    runs.get(run_id)
+    return runs.db.run_events(run_id, after_seq=after, limit=5000)
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, _: Admin, request: Request, runs: Runs) -> dict:
+    return run_out(await runs.cancel(run_id, auth.client_ip(request)))
+
+
+EVENT_BATCH_SECONDS = 0.15
+EVENT_BATCH_MAX = 500
+
+
+@app.websocket("/api/runs/{run_id}/events")
+async def run_events(ws: WebSocket, run_id: str) -> None:
+    """Backlog on connect, then live events batched every 150 ms as {"events": [...]}.
+    Closes with 1000 after the run's "done" event; 4401 not logged in; 4404 no such run."""
+    runs: RunManager = ws.app.state.runs
+    if not auth.configured() or not auth.ws_allowed(ws):
+        await ws.close(code=4401)
+        return
+    if runs.db.get_run(run_id) is None:
+        await ws.accept()
+        await ws.close(code=4404, reason="No such run")
+        return
+    queue = runs.subscribe(run_id)  # before reading the backlog, so nothing falls in between
+    try:
+        await ws.accept()
+        backlog = runs.db.run_events(run_id)
+        last = backlog[-1]["seq"] if backlog else -1
+        for i in range(0, len(backlog), EVENT_BATCH_MAX):
+            await ws.send_json({"events": backlog[i:i + EVENT_BATCH_MAX]})
+        done = any(e["type"] == "done" for e in backlog)
+        while not done:
+            try:
+                first = await asyncio.wait_for(queue.get(), timeout=25)
+            except TimeoutError:
+                await ws.send_json({"events": []})  # keep-alive; also detects a closed socket
+                continue
+            await asyncio.sleep(EVENT_BATCH_SECONDS)
+            batch = [first]
+            while not queue.empty() and len(batch) < EVENT_BATCH_MAX:
+                batch.append(queue.get_nowait())
+            batch = [e for e in batch if e["seq"] > last]
+            if batch:
+                last = batch[-1]["seq"]
+                await ws.send_json({"events": batch})
+                done = any(e["type"] == "done" for e in batch)
+        await ws.close(code=1000)
+    except Exception:  # noqa: BLE001  (client went away)
+        pass
+    finally:
+        runs.unsubscribe(run_id, queue)
 
 
 # ---------------------------------------------------------------------------
