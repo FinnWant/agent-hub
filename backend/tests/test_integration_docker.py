@@ -82,3 +82,33 @@ def test_stop_and_start_keep_workspace(real):
     svc.stop(sb.id, "test")
     svc.start(sb.id, "test")
     assert svc.exec(sb.id, "cat /workspace/marker", None, "test").output.strip() == "kept"
+
+
+def test_terminal_shell_runs_as_agent_and_is_killed_on_close(real):
+    import asyncio
+
+    svc, created = real
+    sb = svc.create(name="term", template="python", repo_url=None, base_branch=None,
+                    memory=512 * 2**20, cpus=1, ip="test")
+    created.append(sb.id)
+
+    async def session() -> tuple[bytes, str]:
+        term = await svc.backend.open_terminal(sb.container_id, 100, 30)
+        await term.write(b"python3 --version; echo \"who=$(id -un) size=$(stty size)\"; sleep 600 &\r")
+        buf = b""
+        async with asyncio.timeout(20):
+            while b"who=agent" not in buf or not buf.rstrip().endswith(b"$"):
+                chunk = await term.read()
+                assert chunk, f"shell ended early: {buf!r}"
+                buf += chunk
+        await term.close()
+        return buf, term.tag
+
+    out, tag = asyncio.run(session())
+    assert b"Python 3." in out and b"who=agent size=30 100" in out, out
+    # Only the shell (tagged argv[0]) and the job it started; the container's own
+    # `sleep infinity` keeps running, as it should.
+    left = svc.exec(sb.id, ["sh", "-c", f"pgrep -f '^({tag}|sleep 600)' || true"], 15, "test")
+    procs = svc.exec(sb.id, ["ps", "-eo", "pid,args"], 15, "test").output
+    assert left.output.strip() == "", f"shell or its children survived close():\n{procs}"
+    assert "sleep infinity" in procs  # the sandbox itself is untouched

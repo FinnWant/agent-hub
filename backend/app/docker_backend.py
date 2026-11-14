@@ -16,6 +16,7 @@ from typing import Any, Protocol
 from . import config
 from .db import Sandbox
 from .templates import Template
+from .terminal import DockerTerminal, FakeTerminal, TerminalSession, unix_socket_path
 
 MANAGED_LABEL = "agent-hub.managed"
 SANDBOX_LABEL = "agent-hub.sandbox-id"
@@ -94,6 +95,7 @@ class Backend(Protocol):
     def remove(self, container_id: str | None, volume: str) -> None: ...
     def status(self, container_id: str) -> str: ...
     def exec(self, container_id: str, cmd: str | list[str], timeout: int) -> ExecResult: ...
+    async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession: ...
 
 
 def _limit(data: bytes) -> tuple[str, bool]:
@@ -181,6 +183,17 @@ class DockerBackend:
         text, truncated = _limit(out or b"")
         return ExecResult(exit_code=code, output=text, truncated=truncated, timed_out=code in (124, 137))
 
+    async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession:
+        import asyncio
+
+        c = await asyncio.to_thread(self._managed, container_id)
+        if c is None or c.status != "running":
+            raise BackendError("Sandbox is not running")
+        term = DockerTerminal(self.client.api, c.id, unix_socket_path(config.settings.docker_host),
+                              SANDBOX_USER, WORKDIR)
+        await term.start(cols, rows)
+        return term
+
 
 class FakeBackend:
     """In-memory stand-in with the same safety checks, for tests and DEMO_MODE."""
@@ -192,6 +205,7 @@ class FakeBackend:
         self.images: set[str] = set()
         self.created_specs: list[dict[str, Any]] = []
         self.fail_next_start: str | None = None
+        self.terminals: list[FakeTerminal] = []
 
     def ping(self) -> bool:
         return True
@@ -249,3 +263,12 @@ class FakeBackend:
             raise BackendError("Sandbox is not running")
         shown = cmd if isinstance(cmd, str) else shlex.join(cmd)
         return ExecResult(exit_code=0, output=f"(demo) $ {shown}\n", truncated=False, timed_out=False)
+
+    async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession:
+        c = self._managed(container_id)
+        if c is None or c["status"] != "running":
+            raise BackendError("Sandbox is not running")
+        term = FakeTerminal()
+        await term.resize(cols, rows)
+        self.terminals.append(term)
+        return term

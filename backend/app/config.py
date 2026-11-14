@@ -98,6 +98,13 @@ class Settings:
     exec_timeout_max: int = _int("EXEC_TIMEOUT_MAX", 600)
     exec_output_limit: int = _int("EXEC_OUTPUT_LIMIT", 64 * 1024)
 
+    # Browser terminals (docker exec with a TTY, one shell per WebSocket)
+    max_terminals: int = _int("MAX_TERMINALS", 4)
+    terminal_idle_timeout: int = _int("TERMINAL_IDLE_TIMEOUT", 3600)
+
+    # Built web UI (frontend/dist); served at / when present.
+    frontend_dir: Path = Path(os.getenv("FRONTEND_DIR", str(Path(__file__).resolve().parents[2] / "frontend" / "dist")))
+
     # Storage / modes
     db_path: Path = Path(os.getenv("DB_PATH", "data/agent-hub.db")).expanduser()
     demo_mode: bool = _bool("DEMO_MODE", False)

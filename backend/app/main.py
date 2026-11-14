@@ -1,14 +1,17 @@
-"""FastAPI app: auth, system info, templates, sandboxes, exec, audit log."""
+"""FastAPI app: auth, system info, templates, sandboxes, exec, terminal, audit log, web UI."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import __version__, auth, config
@@ -18,6 +21,7 @@ from .db import Database, Sandbox
 from .docker_backend import Backend, BackendError, DockerBackend, FakeBackend, NotManaged
 from .sandboxes import SandboxError, SandboxService
 from .templates import TEMPLATES
+from .terminal import TerminalSession
 
 log = logging.getLogger("agent_hub")
 
@@ -39,12 +43,44 @@ async def lifespan(app: FastAPI):
         svc.backend.ensure_network()
     except Exception as e:  # keep serving so /api/health can report the problem
         log.error("Docker unavailable at startup: %s", e)
+    if config.settings.demo_mode:
+        seed_demo(svc)
     yield
+
+
+def seed_demo(svc: SandboxService) -> None:
+    """Give DEMO_MODE something to show on first start."""
+    if svc.db.list_sandboxes():
+        return
+    for name, template, memory in (("api-server", "python", 2 * 2**30), ("landing-page", "static", 512 * 2**20)):
+        try:
+            svc.create(name=name, template=template, repo_url=None, base_branch=None,
+                       memory=memory, cpus=None, ip="demo")
+        except SandboxError as e:
+            log.info("demo seed skipped %s: %s", name, e)
 
 
 app = FastAPI(title="Agent Hub", version=__version__, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 Admin = Annotated[None, Depends(auth.require_admin)]
+
+# xterm.js and React set inline styles; everything else is same-origin only.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
+       "object-src 'none'")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("Content-Security-Policy", CSP)
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path.startswith("/api/"):
+        h.setdefault("Cache-Control", "no-store")
+    return response
 
 
 def service(request: Request) -> SandboxService:
@@ -234,6 +270,107 @@ def exec_in_sandbox(sandbox_id: str, body: ExecBody, _: Admin, request: Request,
 
 
 # ---------------------------------------------------------------------------
+# Terminal (WebSocket)
+#   client -> server: binary frames = keystrokes; text frames = {"type": "resize", "cols", "rows"}
+#   server -> client: binary frames = terminal output
+#   close codes: 4401 not logged in, 4404 no such sandbox, 4409 not running / too many terminals,
+#                4408 idle timeout, 4502 Docker error, 1000 shell exited
+# ---------------------------------------------------------------------------
+
+MAX_INPUT_FRAME = 64 * 1024
+
+
+def _dims(cols: object, rows: object) -> tuple[int, int]:
+    def clamp(v: object, default: int, hi: int) -> int:
+        try:
+            return max(2, min(int(v), hi))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+    return clamp(cols, 80, 500), clamp(rows, 24, 200)
+
+
+async def _bridge(ws: WebSocket, term: TerminalSession) -> str:
+    idle = config.settings.terminal_idle_timeout
+
+    async def output() -> str:
+        while data := await term.read():
+            await ws.send_bytes(data)
+        return "shell exited"
+
+    async def keyboard() -> str:
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=idle)
+            except TimeoutError:
+                return "idle timeout"
+            if msg["type"] == "websocket.disconnect":
+                return "client closed"
+            if (data := msg.get("bytes")) is not None:
+                if len(data) <= MAX_INPUT_FRAME:
+                    await term.write(data)
+            elif text := msg.get("text"):
+                try:
+                    m = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(m, dict) and m.get("type") == "resize":
+                    await term.resize(*_dims(m.get("cols"), m.get("rows")))
+
+    tasks = [asyncio.create_task(output()), asyncio.create_task(keyboard())]
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    try:
+        reason = done.pop().result()
+    except Exception:  # the browser went away mid-send
+        return "client closed"
+    if reason != "client closed":
+        try:
+            await ws.close(code=4408 if reason == "idle timeout" else 1000, reason=reason)
+        except Exception:
+            pass
+    return reason
+
+
+@app.websocket("/api/sandboxes/{sandbox_id}/terminal")
+async def terminal(ws: WebSocket, sandbox_id: str) -> None:
+    svc: SandboxService = ws.app.state.service
+    ip = auth.client_ip(ws)
+    if not auth.configured() or not auth.ws_allowed(ws):
+        await ws.close(code=4401)  # before accept(): the handshake itself is refused
+        return
+    cols, rows = _dims(ws.query_params.get("cols"), ws.query_params.get("rows"))
+    try:
+        sb = await asyncio.to_thread(svc.reserve_terminal, sandbox_id, ip)
+    except SandboxError as e:
+        await ws.accept()
+        await ws.close(code=4000 + e.status_code, reason=str(e)[:120])
+        return
+    term: TerminalSession | None = None
+    started = time.monotonic()
+    reason = "error"
+    try:
+        try:
+            term = await svc.backend.open_terminal(sb.container_id or "", cols, rows)
+        except Exception as e:
+            log.warning("terminal open failed for %s: %s", sb.id, e)
+            svc.db.audit(ip, "terminal.open", sb.id, ok=False, detail={"error": str(e)[:200]})
+            await ws.accept()
+            await ws.close(code=4502, reason="Could not open a shell")
+            return
+        await ws.accept()
+        svc.db.audit(ip, "terminal.open", sb.id, detail={"cols": cols, "rows": rows})
+        reason = await _bridge(ws, term)
+    finally:
+        if term is not None:
+            await term.close()
+            svc.db.audit(ip, "terminal.close", sb.id,
+                         detail={"seconds": round(time.monotonic() - started), "reason": reason})
+        svc.release_terminal()
+
+
+# ---------------------------------------------------------------------------
 # Audit
 # ---------------------------------------------------------------------------
 
@@ -241,3 +378,25 @@ def exec_in_sandbox(sandbox_id: str, body: ExecBody, _: Admin, request: Request,
 def audit(_: Admin, svc: Svc, limit: int = Query(100, ge=1, le=500),
           before_id: int | None = Query(None, ge=1)) -> list[dict]:
     return svc.db.list_audit(limit=limit, before_id=before_id)
+
+
+# ---------------------------------------------------------------------------
+# Web UI (frontend/dist). Registered last so it never shadows an API route.
+# ---------------------------------------------------------------------------
+
+@app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+def web_ui(path: str) -> Response:
+    if path == "api" or path.startswith("api/"):
+        raise HTTPException(404, "Not found")
+    root = config.settings.frontend_dir.resolve()
+    if path:
+        f = (root / path).resolve()
+        if f.is_relative_to(root) and f.is_file():
+            immutable = f.is_relative_to(root / "assets")
+            return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable"
+                                            if immutable else "no-cache"})
+    index = root / "index.html"
+    if not index.is_file():
+        return PlainTextResponse("The web UI isn't built. Run deploy/install.sh (or npm run build in frontend/).",
+                                 status_code=404)
+    return FileResponse(index, headers={"Cache-Control": "no-cache"})

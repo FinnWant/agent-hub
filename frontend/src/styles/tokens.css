@@ -1,0 +1,126 @@
+/* Kiln design tokens (Figma: "Kiln" file, collections prim / col / sp / motion).
+   Dark only. Ember is reserved for the primary action and focus; status colours carry state. */
+:root {
+  /* Primitives: slate */
+  --slate-50: #f6f8fb;
+  --slate-100: #e6eaf2;
+  --slate-200: #cdd5e1;
+  --slate-300: #a9b4c6;
+  --slate-400: #8291a8;
+  --slate-500: #5e6c83;
+  --slate-600: #434f63;
+  --slate-700: #2c3546;
+  --slate-800: #1d2432;
+  --slate-850: #171d29;
+  --slate-900: #121722;
+  --slate-925: #0e121b;
+  --slate-950: #0a0d14;
+  --slate-1000: #06080d;
+  /* Primitives: ember */
+  --ember-50: #fff3ec;
+  --ember-100: #ffe1cf;
+  --ember-200: #ffc09b;
+  --ember-300: #ff9a62;
+  --ember-400: #ff7a33;
+  --ember-500: #ff5e14;
+  --ember-600: #e64800;
+  --ember-700: #b33800;
+  /* Primitives: status */
+  --green-400: #4ade9a;
+  --red-400: #ff6b70;
+  --red-500: #ef4449;
+  --amber-400: #fbc54f;
+  --blue-400: #6fa0ff;
+  --violet-400: #a88bfa;
+
+  /* Semantic: backgrounds */
+  --bg-canvas: var(--slate-1000);
+  --bg-app: var(--slate-950);
+  --bg-surface: var(--slate-925);
+  --bg-raised: var(--slate-900);
+  --bg-overlay: var(--slate-850);
+  --bg-inset: var(--slate-1000);
+  --bg-hover: rgb(255 255 255 / 0.03);
+  --bg-active: rgb(255 255 255 / 0.06);
+  /* Semantic: text */
+  --text-primary: var(--slate-100);
+  --text-secondary: var(--slate-300);
+  --text-tertiary: var(--slate-400);
+  --text-disabled: var(--slate-600);
+  --text-accent: var(--ember-300);
+  --text-on-accent: var(--slate-1000);
+  /* Semantic: borders */
+  --border-subtle: rgb(255 255 255 / 0.06);
+  --border-default: rgb(255 255 255 / 0.1);
+  --border-strong: rgb(255 255 255 / 0.16);
+  --border-accent: var(--ember-500);
+  /* Semantic: accent */
+  --accent: var(--ember-500);
+  --accent-hover: var(--ember-400);
+  --accent-pressed: var(--ember-600);
+  --accent-subtle: rgb(255 94 20 / 0.12);
+  --accent-muted: rgb(255 94 20 / 0.24);
+  /* Semantic: status */
+  --status-success: var(--green-400);
+  --status-success-subtle: rgb(74 222 154 / 0.12);
+  --status-danger: var(--red-400);
+  --status-danger-subtle: rgb(255 107 112 / 0.12);
+  --status-warning: var(--amber-400);
+  --status-warning-subtle: rgb(251 197 79 / 0.12);
+  --status-info: var(--blue-400);
+  --status-info-subtle: rgb(111 160 255 / 0.12);
+  --status-idle: var(--slate-500);
+
+  /* Spacing (4px grid) */
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 999px;
+
+  /* Type */
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+
+  /* Matte sheen: a faint top-lit gradient plus a hairline highlight on raised surfaces */
+  --sheen: linear-gradient(180deg, rgb(255 255 255 / 0.025) 0%, rgb(255 255 255 / 0) 60%);
+  --highlight: inset 0 1px 0 rgb(255 255 255 / 0.04);
+  --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.4);
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+  }
+}

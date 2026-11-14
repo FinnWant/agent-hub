@@ -67,6 +67,13 @@ echo "==> Creating Python environment"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
 chmod 600 "$ENV_FILE"
 
+echo "==> Building the web UI"
+command -v npm >/dev/null || die "Node.js (20.19+ or 22.12+) with npm is needed to build the web UI"
+node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=12)||(a===20&&b>=19)||a===21?0:1)' \
+  || die "Node.js $(node --version) is too old for the web UI build (need 20.19+ or 22.12+)"
+# As agenthub, with dependency install scripts disabled; versions are pinned by package-lock.json.
+as_agent bash -c "cd '$APP_DIR/frontend' && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null && npm run -s build >/dev/null"
+
 echo "==> Applying the sandbox egress filter"
 # Runs as root, so it lives in a root-owned path agenthub can't modify.
 install -m 755 -o root -g root "$APP_DIR/deploy/egress.sh" /usr/local/sbin/agent-hub-egress
@@ -102,10 +109,11 @@ cat <<EOF
 
 Agent Hub is installed and listening on $(env_get BIND_HOSTS) port $PORT.
 
-Next steps:
-  1. Set the admin password (until then every request gets 503):
+Open http://$(env_get BIND_HOSTS | tr ',' '\n' | grep -v '^127\.' | head -1):$PORT in a browser on your tailnet.
+If you haven't yet:
+  - set the admin password (until then every request gets 503):
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_password
        sudo systemctl restart agent-hub
-  2. In the Tailscale admin console, add "tcp:$PORT" to the ACL grant for this server.
-  3. Run the phase 1 checks: bash deploy/smoke-test.sh
+  - in the Tailscale admin console, add "tcp:$PORT" to the ACL grant for this server.
+Checks: bash deploy/smoke-test.sh (API) and bash deploy/integration-test.sh (Docker).
 EOF

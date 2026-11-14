@@ -1,0 +1,86 @@
+import { useEffect, useState } from "react";
+import { api, setUnauthorizedHandler, type Health } from "./lib/api";
+import { match, navigate, usePath, useLinkInterception } from "./lib/router";
+import { Icon, ToastProvider } from "./components/ui";
+import Login from "./pages/Login";
+import Home from "./pages/Home";
+import SandboxDetail from "./pages/SandboxDetail";
+import Audit from "./pages/Audit";
+
+type AuthState = "checking" | "in" | "out" | "unconfigured";
+
+export default function App() {
+  const [auth, setAuth] = useState<AuthState>("checking");
+  const [health, setHealth] = useState<Health | null>(null);
+  const path = usePath();
+  useLinkInterception();
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setAuth("out"));
+    api.health().then(setHealth).catch(() => {});
+    api
+      .me()
+      .then(() => setAuth("in"))
+      .catch((e) => setAuth(e.status === 503 ? "unconfigured" : "out"));
+  }, []);
+
+  if (auth === "checking") return null;
+  if (auth !== "in") {
+    return (
+      <ToastProvider>
+        <Login unconfigured={auth === "unconfigured"} demo={!!health?.demo} onLoggedIn={() => setAuth("in")} />
+      </ToastProvider>
+    );
+  }
+
+  const route = match(path);
+  const logout = async () => {
+    await api.logout().catch(() => {});
+    setAuth("out");
+    navigate("/", true);
+  };
+
+  return (
+    <ToastProvider>
+      <div className="shell">
+        <nav className="sidebar" aria-label="Main">
+          <a href="/" className="brand">
+            <span className="brand-mark" aria-hidden />
+            <span>Agent Hub</span>
+          </a>
+          <a href="/" className="nav-item" aria-current={route.name === "home" || route.name === "sandbox" ? "page" : undefined}>
+            <Icon name="box" /> Sandboxes
+          </a>
+          <a href="/audit" className="nav-item" aria-current={route.name === "audit" ? "page" : undefined}>
+            <Icon name="list" /> Audit log
+          </a>
+          <div className="sidebar-foot">
+            {health && (
+              <div className="host-mini muted" style={{ fontSize: 11 }}>
+                {health.demo ? "Demo mode · simulated Docker" : health.docker ? "Docker connected" : "Docker unreachable"}
+                <br />
+                <span className="mono">v{health.version}</span>
+              </div>
+            )}
+            <button className="btn btn-ghost btn-sm" onClick={logout} style={{ justifyContent: "flex-start" }}>
+              <Icon name="logout" /> Log out
+            </button>
+          </div>
+        </nav>
+        <main className="main" id="main">
+          {route.name === "home" && <Home />}
+          {route.name === "sandbox" && <SandboxDetail id={route.id} />}
+          {route.name === "audit" && <Audit />}
+          {route.name === "notFound" && (
+            <div className="page">
+              <div className="empty">
+                <h2>Nothing here</h2>
+                <a className="btn" href="/">Back to sandboxes</a>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </ToastProvider>
+  );
+}

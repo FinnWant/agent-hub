@@ -62,6 +62,8 @@ class SandboxService:
         self.host_state = host_state
         # Serialises capacity check + start so two requests can't both squeeze past a cap.
         self._lock = threading.Lock()
+        self._term_lock = threading.Lock()
+        self.open_terminals = 0
 
     # ---- queries -----------------------------------------------------------
 
@@ -191,6 +193,26 @@ class SandboxService:
         self.db.audit(ip, "sandbox.exec", sb.id, ok=result.exit_code == 0,
                       detail={"cmd": shown[:200], "exit_code": result.exit_code})
         return result
+
+    # ---- terminals -----------------------------------------------------------
+
+    def reserve_terminal(self, sandbox_id: str, ip: str) -> Sandbox:
+        """Check the sandbox can take a shell and claim one of the global terminal slots.
+        Pair every successful call with `release_terminal()`."""
+        sb = self.get(sandbox_id)
+        if sb.state != "running" or not sb.container_id:
+            raise InvalidTransition("Sandbox is not running")
+        limit = config.settings.max_terminals
+        with self._term_lock:
+            if self.open_terminals >= limit:
+                self.db.audit(ip, "terminal.open", sb.id, ok=False, detail={"error": "too many terminals"})
+                raise CapacityError([f"At most {limit} terminals can be open at once. Close one first."])
+            self.open_terminals += 1
+        return sb
+
+    def release_terminal(self) -> None:
+        with self._term_lock:
+            self.open_terminals = max(0, self.open_terminals - 1)
 
     def reconcile_on_startup(self) -> None:
         """A crash mid-create leaves rows in 'creating'; mark them so the user can destroy them."""

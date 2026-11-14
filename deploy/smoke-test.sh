@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 1 acceptance check, run on the server after install.sh and set_password.
+# Acceptance checks (phases 1-2), run on the server after install.sh and set_password.
 # Talks to the API over the Tailscale address with curl, like a remote client would.
 #   bash deploy/smoke-test.sh [base-url]
 # Prompts for the admin password and (once) for sudo, to show `docker inspect` as agenthub.
@@ -19,7 +19,7 @@ sx()   { # run a shell command in the sandbox; prints output, returns its exit c
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("output", d).strip() if isinstance(d.get("output"), str) else d); sys.exit(d.get("exit_code", 99))' "$out"
 }
 
-echo "Agent Hub phase 1 checks against $BASE"
+echo "Agent Hub checks against $BASE"
 
 echo "-- auth"
 [[ $(code "$BASE/api/health") == 200 ]] && ok "health is public" || bad "health"
@@ -42,6 +42,18 @@ echo "-- exec"
 out=$(sx "python3 --version") && [[ $out == Python\ 3* ]] && ok "exec: $out" || bad "exec python3 --version: $out"
 out=$(sx 'echo "$(id -un) uid=$(id -u)"') && [[ $out == "agent uid=1000" ]] && ok "runs as $out" || bad "user: $out"
 out=$(sx "grep CapEff /proc/self/status") && [[ $out == *0000000000000000 ]] && ok "no capabilities ($out)" || bad "caps: $out"
+
+echo "-- terminal (WebSocket)"
+TOKEN=$(awk '$6 == "ah_session" {print $7}' "$JAR")
+out=$(AH_SESSION=$TOKEN /opt/agent-hub/.venv/bin/python "$(dirname "$0")/terminal-check.py" "$BASE" "$SID" 2>&1)
+if grep -qE '^  (PASS|FAIL)' <<<"$out"; then
+  grep -E '^  (PASS|FAIL)' <<<"$out"
+  PASS=$((PASS + $(grep -c '^  PASS' <<<"$out"))); FAIL=$((FAIL + $(grep -c '^  FAIL' <<<"$out")))
+else
+  bad "terminal check crashed: $out"
+fi
+api "$BASE/api/audit?limit=10" | python3 -c 'import json,sys; a=[e["action"] for e in json.load(sys.stdin)]; sys.exit(0 if "terminal.open" in a and "terminal.close" in a else 1)' \
+  && ok "terminal session is in the audit log" || bad "terminal session missing from audit log"
 
 echo "-- limits (docker inspect as agenthub)"
 AUID=$(id -u agenthub)
