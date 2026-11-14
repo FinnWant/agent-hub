@@ -55,6 +55,16 @@ if [[ $(env_get BIND_HOSTS) == *"<tailscale-ip>"* || -z $(env_get BIND_HOSTS) ]]
   [[ -n $TS_IP ]] || die "couldn't read the Tailscale IP; set BIND_HOSTS in $ENV_FILE"
   env_set BIND_HOSTS "127.0.0.1,$TS_IP"
 fi
+# Previews: published on the Tailscale IP only, linked by the MagicDNS name (a different
+# hostname from the one you open Agent Hub on, so previews never see its session cookie).
+if [[ -z $(env_get PREVIEW_BIND) || $(env_get PREVIEW_BIND) == *"<"* ]]; then
+  env_set PREVIEW_BIND "$(env_get BIND_HOSTS | tr ',' '\n' | grep -v '^127\.' | head -1)"
+fi
+if [[ -z $(env_get PREVIEW_HOST) || $(env_get PREVIEW_HOST) == *"<"* ]]; then
+  TS_NAME=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
+  if [[ -n $TS_NAME ]]; then env_set PREVIEW_HOST "$TS_NAME"
+  else echo "Warning: no MagicDNS name found; previews stay off until PREVIEW_HOST is set in $ENV_FILE"; fi
+fi
 # Disk I/O throttling applies to the block device holding Docker's data (on /).
 if [[ -z $(env_get SANDBOX_IO_DEVICE) ]] \
    && grep -qw io "/sys/fs/cgroup/user.slice/user-$AGENT_UID.slice/user@$AGENT_UID.service/cgroup.controllers" 2>/dev/null; then
@@ -102,6 +112,9 @@ PORT=$(env_get PORT); PORT=${PORT:-8090}
 if ufw status 2>/dev/null | grep -q "Status: active"; then
   echo "==> Allowing port $PORT on tailscale0 (ufw)"
   ufw allow in on tailscale0 to any port "$PORT" proto tcp comment 'agent-hub' >/dev/null
+  PREVIEW_RANGE=$(env_get PREVIEW_PORT_RANGE); PREVIEW_RANGE=${PREVIEW_RANGE:-8200-8299}
+  echo "==> Allowing preview ports $PREVIEW_RANGE on tailscale0 (ufw)"
+  ufw allow in on tailscale0 to any port "${PREVIEW_RANGE/-/:}" proto tcp comment 'agent-hub previews' >/dev/null
 fi
 
 sleep 2
@@ -116,7 +129,8 @@ If you haven't yet:
   - set the admin password (until then every request gets 503):
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_password
        sudo systemctl restart agent-hub
-  - in the Tailscale admin console, add "tcp:$PORT" to the ACL grant for this server.
+  - in the Tailscale admin console, add "tcp:$PORT" and "tcp:8200-8299" (previews) to the
+    ACL grant for this server.
   - for agent runs, store the Claude token (from `claude setup-token`) and, to push
     branches, a fine-grained GitHub token:
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_secret claude

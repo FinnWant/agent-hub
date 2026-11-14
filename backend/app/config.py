@@ -62,11 +62,17 @@ class Settings:
     bind_hosts: list[str] = field(default_factory=lambda: _list("BIND_HOSTS", "127.0.0.1"))
     port: int = _int("PORT", 8090)
     preview_port_range: str = os.getenv("PREVIEW_PORT_RANGE", "8200-8299")
+    # Previews are published on this address only (the Tailscale IP; never 0.0.0.0) ...
+    preview_bind: str = os.getenv("PREVIEW_BIND", "")
+    # ... and linked by this hostname (MagicDNS), which must differ from the one you use for
+    # Agent Hub: browsers send cookies to every port of a host, so a preview on the same host
+    # would receive the session cookie. Logins on this hostname are refused.
+    preview_host: str = os.getenv("PREVIEW_HOST", "")
 
     # Docker: the agenthub user's rootless daemon.
     docker_host: str = os.getenv("DOCKER_HOST", "")
     network_name: str = os.getenv("SANDBOX_NETWORK", "agent-sandboxes")
-    image_version: str = os.getenv("IMAGE_VERSION", "2")
+    image_version: str = os.getenv("IMAGE_VERSION", "3")
     # "runc" today; "runsc" (gVisor) later is a one-line change.
     container_runtime: str = os.getenv("CONTAINER_RUNTIME", "")
 
@@ -92,6 +98,10 @@ class Settings:
     io_device: str = os.getenv("SANDBOX_IO_DEVICE", "")
     io_read_bps: int = _size("SANDBOX_IO_READ_BPS", "200m")
     io_write_bps: int = _size("SANDBOX_IO_WRITE_BPS", "100m")
+
+    # Resource monitoring
+    stats_interval: int = _int("STATS_INTERVAL", 15)               # seconds, memory use
+    workspace_size_interval: int = _int("WORKSPACE_SIZE_INTERVAL", 300)  # seconds, du of /workspace
 
     # Exec endpoint
     exec_timeout_default: int = _int("EXEC_TIMEOUT_DEFAULT", 60)
@@ -124,6 +134,16 @@ class Settings:
     # Storage / modes
     db_path: Path = Path(os.getenv("DB_PATH", "data/agent-hub.db")).expanduser()
     demo_mode: bool = _bool("DEMO_MODE", False)
+
+
+    @property
+    def preview_ports(self) -> range:
+        lo, _, hi = self.preview_port_range.partition("-")
+        return range(int(lo), int(hi or lo) + 1)
+
+    @property
+    def previews_enabled(self) -> bool:
+        return bool(self.preview_bind and self.preview_host)
 
 
 settings = Settings()

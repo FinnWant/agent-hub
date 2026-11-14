@@ -213,3 +213,71 @@ def test_real_claude_code_run(real):
     assert config.settings.claude_code_oauth_token not in json.dumps(evs)
     r = svc.exec(sb.id, f"git show {done.branch}:hello.txt", 30, "t")
     assert r.output.strip() == "hi", r.output
+
+
+# ---------------------------------------------------------------------------
+# Files, diff, preview, stats, prune (phase 4)
+# ---------------------------------------------------------------------------
+
+def test_files_and_run_diff(real):
+    import asyncio
+
+    from app import files
+
+    svc, created = real
+    sb = _sandbox(svc, created, "review")
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="printf '# Title\\n\\nNew section\\n' > README.md; mkdir -p src; "
+                      "echo 'print(1)' > src/main.py", runner="script", timeout=60, max_turns=1, ip="t")
+    asyncio.run(runs._execute(run))
+    run = svc.db.get_run(run.id)
+    assert run.state == "succeeded" and run.commit_sha
+    sb = svc.get(sb.id)
+    root = files.browse(svc.backend, sb, "")
+    assert {"README.md", "src", ".git"} <= {e["name"] for e in root["entries"]}
+    assert files.browse(svc.backend, sb, "src/main.py")["content"] == "print(1)\n"
+    with pytest.raises(files.PathError):
+        files.browse(svc.backend, sb, "../etc/passwd")
+    d = files.run_diff(svc.backend, sb, run)
+    assert {f["path"] for f in d["files"]} == {"README.md", "src/main.py"} and "+New section" in d["patch"]
+
+
+def test_preview_is_served_on_tailscale_ip_only(real, monkeypatch):
+    import dataclasses
+    import time
+
+    from app import config, preview
+
+    env = config.Settings()  # the server's real .env, not the test defaults
+    if not env.previews_enabled:
+        pytest.skip("PREVIEW_BIND / PREVIEW_HOST not configured")
+    monkeypatch.setattr(config, "settings", dataclasses.replace(
+        config.settings, preview_bind=env.preview_bind, preview_host=env.preview_host,
+        preview_port_range=env.preview_port_range))
+    svc, created = real
+    sb = _sandbox(svc, created, "preview")
+    assert sb.preview_port in config.settings.preview_ports
+    preview.start_static(svc.backend, sb)
+    for _ in range(20):
+        if preview.status(svc.backend, sb)["listening"] == "any":
+            break
+        time.sleep(0.25)
+    assert preview.status(svc.backend, sb)["static_server"] is True
+    # Published on the Tailscale IP only. (An HTTP check from here can't work: the egress filter
+    # stops agenthub from reaching the host's own addresses. smoke-test.sh checks it as you.)
+    bindings = svc.backend.client.containers.get(sb.container_id).attrs["HostConfig"]["PortBindings"]
+    assert bindings == {"8000/tcp": [{"HostIp": env.preview_bind, "HostPort": str(sb.preview_port)}]}, bindings
+    preview.stop_static(svc.backend, sb)
+    assert preview.status(svc.backend, sb)["static_server"] is False
+
+
+def test_memory_stats_and_prune_keep_sandboxes(real):
+    from app.templates import TEMPLATES
+
+    svc, created = real
+    sb = _sandbox(svc, created, "stats")
+    used = svc.backend.memory_usage(sb.container_id)
+    assert used is not None and 0 < used < sb.memory
+    keep = {s.id for s in svc.db.list_sandboxes()}
+    svc.backend.prune(keep, {t.image for t in TEMPLATES.values()})
+    assert svc.backend.status(sb.container_id) == "running"

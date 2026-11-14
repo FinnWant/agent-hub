@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS run_events (
 # Columns added after a table first shipped: (table, column, definition).
 MIGRATIONS = [
     ("sandboxes", "allow_push", "INTEGER NOT NULL DEFAULT 0"),
+    ("sandboxes", "preview_port", "INTEGER"),
+    ("sandboxes", "workspace_bytes", "INTEGER"),
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -96,6 +98,8 @@ class Sandbox:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     allow_push: bool = False
+    preview_port: int | None = None      # host port (Tailscale IP) published for previews
+    workspace_bytes: int | None = None   # last measured size of /workspace
 
     def __post_init__(self) -> None:
         self.allow_push = bool(self.allow_push)

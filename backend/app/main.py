@@ -18,11 +18,13 @@ from . import __version__, auth, config
 from .capacity import disk_usage, mem_available, mem_total
 from .config import format_size, parse_size
 from .db import Database, Sandbox
+from . import demo, files as files_mod, preview as preview_mod
 from .db import Run
+from .monitor import Monitor
 from .docker_backend import Backend, BackendError, DockerBackend, FakeBackend, NotManaged
 from .runners import default_runners
 from .runs import RunManager
-from .sandboxes import SandboxError, SandboxService
+from .sandboxes import InvalidTransition, SandboxError, SandboxService
 from .templates import TEMPLATES
 from .terminal import TerminalSession
 from .workspace import default_workspace
@@ -56,7 +58,11 @@ async def lifespan(app: FastAPI):
         log.error("Docker unavailable at startup: %s", e)
     if config.settings.demo_mode:
         seed_demo(svc)
+    app.state.monitor = Monitor(svc)
+    task = asyncio.create_task(app.state.monitor.run()) if config.settings.stats_interval > 0 else None
     yield
+    if task:
+        task.cancel()
 
 
 def seed_demo(svc: SandboxService) -> None:
@@ -140,7 +146,8 @@ class LoginBody(BaseModel):
     password: str = Field(max_length=1024)
 
 
-@app.post("/api/auth/login", dependencies=[Depends(auth.require_configured), Depends(auth.require_csrf)])
+@app.post("/api/auth/login", dependencies=[Depends(auth.require_not_preview_host), Depends(auth.require_configured),
+                                           Depends(auth.require_csrf)])
 def login(body: LoginBody, request: Request, response: Response, svc: Svc) -> dict:
     ip = auth.client_ip(request)
     wait = auth.login_limiter.retry_after(ip)
@@ -197,6 +204,8 @@ def system(_: Admin, svc: Svc) -> dict:
         "sandboxes": {"running": len(running), "memory_used": used},
         "can_start_default": not blockers,
         "blockers": blockers,
+        "preview": {"enabled": s.previews_enabled, "host": s.preview_host.rstrip(".") or None,
+                    "ports": s.preview_port_range},
         # Only whether credentials exist, never their values.
         "agent": {"claude_token": bool(s.claude_code_oauth_token) or s.demo_mode,
                   "github_token": bool(s.github_token) or s.demo_mode,
@@ -218,9 +227,11 @@ def templates(_: Admin, svc: Svc) -> list[dict]:
 # Sandboxes
 # ---------------------------------------------------------------------------
 
-def sandbox_out(sb: Sandbox, runs: RunManager | None = None) -> dict:
+def sandbox_out(sb: Sandbox, runs: RunManager | None = None, monitor: Monitor | None = None) -> dict:
     d = sb.to_dict()
     d["memory_human"] = format_size(sb.memory)
+    d["preview_url"] = preview_mod.preview_url(sb)
+    d["memory_usage"] = monitor.memory.get(sb.id) if monitor and sb.state == "running" else None
     d.pop("volume")
     d.pop("container_id")
     if runs is not None:
@@ -250,9 +261,16 @@ class CreateSandbox(BaseModel):
         return v
 
 
+def monitor_of(request: Request) -> Monitor | None:
+    return getattr(request.app.state, "monitor", None)
+
+
+Mon = Annotated[Monitor | None, Depends(monitor_of)]
+
+
 @app.get("/api/sandboxes")
-def list_sandboxes(_: Admin, svc: Svc, runs: Runs) -> list[dict]:
-    return [sandbox_out(sb, runs) for sb in svc.list()]
+def list_sandboxes(_: Admin, svc: Svc, runs: Runs, mon: Mon) -> list[dict]:
+    return [sandbox_out(sb, runs, mon) for sb in svc.list()]
 
 
 @app.post("/api/sandboxes", status_code=201)
@@ -265,8 +283,8 @@ def create_sandbox(body: CreateSandbox, _: Admin, request: Request, svc: Svc) ->
 
 
 @app.get("/api/sandboxes/{sandbox_id}")
-def get_sandbox(sandbox_id: str, _: Admin, svc: Svc, runs: Runs) -> dict:
-    return sandbox_out(svc.get(sandbox_id), runs)
+def get_sandbox(sandbox_id: str, _: Admin, svc: Svc, runs: Runs, mon: Mon) -> dict:
+    return sandbox_out(svc.get(sandbox_id), runs, mon)
 
 
 class SandboxSettings(BaseModel):
@@ -311,6 +329,75 @@ def exec_in_sandbox(sandbox_id: str, body: ExecBody, _: Admin, request: Request,
         raise HTTPException(422, "cmd is empty")
     r = svc.exec(sandbox_id, body.cmd, body.timeout, auth.client_ip(request))
     return {"exit_code": r.exit_code, "output": r.output, "truncated": r.truncated, "timed_out": r.timed_out}
+
+
+# ---------------------------------------------------------------------------
+# Files, diff, preview, workspace size, cleanup
+# ---------------------------------------------------------------------------
+
+def _running_sandbox(svc: SandboxService, sandbox_id: str) -> Sandbox:
+    sb = svc.get(sandbox_id)
+    if sb.state != "running" or not sb.container_id:
+        raise InvalidTransition("Start the sandbox to look inside it")
+    return sb
+
+
+@app.get("/api/sandboxes/{sandbox_id}/files")
+def browse_files(sandbox_id: str, _: Admin, svc: Svc, path: str = Query("", max_length=4096)) -> dict:
+    if config.settings.demo_mode:
+        _running_sandbox(svc, sandbox_id)
+        return demo.browse(path)
+    return files_mod.browse(svc.backend, _running_sandbox(svc, sandbox_id), path)
+
+
+@app.get("/api/runs/{run_id}/diff")
+def run_diff(run_id: str, _: Admin, svc: Svc, runs: Runs) -> dict:
+    run = runs.get(run_id)
+    if config.settings.demo_mode:
+        _running_sandbox(svc, run.sandbox_id)
+        return demo.diff(run)
+    return files_mod.run_diff(svc.backend, _running_sandbox(svc, run.sandbox_id), run)
+
+
+@app.get("/api/sandboxes/{sandbox_id}/preview")
+def preview_status(sandbox_id: str, _: Admin, svc: Svc) -> dict:
+    if config.settings.demo_mode:
+        return demo.preview(svc.get(sandbox_id))
+    return preview_mod.status(svc.backend, svc.get(sandbox_id))
+
+
+@app.post("/api/sandboxes/{sandbox_id}/preview/static")
+def preview_start(sandbox_id: str, _: Admin, request: Request, svc: Svc) -> dict:
+    sb = svc.get(sandbox_id)
+    preview_mod.start_static(svc.backend, sb)
+    svc.db.audit(auth.client_ip(request), "preview.start", sb.id)
+    return preview_mod.status(svc.backend, sb)
+
+
+@app.delete("/api/sandboxes/{sandbox_id}/preview/static")
+def preview_stop(sandbox_id: str, _: Admin, request: Request, svc: Svc) -> dict:
+    sb = svc.get(sandbox_id)
+    preview_mod.stop_static(svc.backend, sb)
+    svc.db.audit(auth.client_ip(request), "preview.stop", sb.id)
+    return preview_mod.status(svc.backend, sb)
+
+
+@app.post("/api/sandboxes/{sandbox_id}/measure")
+def measure_workspace(sandbox_id: str, _: Admin, svc: Svc, mon: Mon) -> dict:
+    sb = _running_sandbox(svc, sandbox_id)
+    size = mon.measure_workspace(sb.id) if mon else None
+    return {"workspace_bytes": size}
+
+
+@app.post("/api/system/prune")
+def prune(_: Admin, request: Request, svc: Svc) -> dict:
+    keep = {sb.id for sb in svc.db.list_sandboxes()}  # every sandbox you haven't destroyed
+    current = {t.image for t in TEMPLATES.values()}
+    result = svc.backend.prune(keep, current)
+    svc.db.audit(auth.client_ip(request), "system.prune", detail={
+        "bytes": result["bytes"], "containers": len(result["containers"]),
+        "volumes": len(result["volumes"]), "images": result["images"][:20]})
+    return result
 
 
 # ---------------------------------------------------------------------------

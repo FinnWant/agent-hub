@@ -17,6 +17,10 @@ export interface Sandbox {
   created_at: number;
   updated_at: number;
   allow_push: boolean;
+  preview_port: number | null;
+  preview_url: string | null;
+  workspace_bytes: number | null;
+  memory_usage: number | null;
   last_run?: { id: string; state: RunState; created_at: number; finished_at: number | null } | null;
 }
 
@@ -51,6 +55,54 @@ export type RunEvent = { seq: number; ts: number } & (
   | { type: "done"; state: RunState; error: string | null; commit: string | null; branch: string; pushed: boolean }
 );
 
+export interface FileEntry {
+  name: string;
+  type: "dir" | "file" | "link" | "other";
+  size: number;
+  target?: string;
+}
+
+export interface Browse {
+  path: string;
+  kind: "dir" | "file" | "link" | "other";
+  size: number;
+  entries?: FileEntry[];
+  truncated?: boolean;
+  content?: string;
+  binary?: boolean;
+  too_large?: boolean;
+  limit?: number;
+  target?: string;
+}
+
+export interface RunDiff {
+  run: string;
+  base: string;
+  branch: string;
+  files: { path: string; added: number | null; removed: number | null }[];
+  size: number;
+  patch?: string;
+  too_large?: boolean;
+}
+
+export interface PreviewStatus {
+  url: string | null;
+  port: number;
+  host_port: number | null;
+  enabled: boolean;
+  listening: "any" | "loopback" | "none" | "stopped";
+  static_server?: boolean;
+  has_index?: boolean;
+  lists_directories?: boolean;
+}
+
+export interface PruneResult {
+  containers: string[];
+  volumes: string[];
+  images: string[];
+  bytes: number;
+}
+
 export interface Template {
   name: string;
   description: string;
@@ -81,6 +133,7 @@ export interface SystemInfo {
   sandboxes: { running: number; memory_used: number };
   can_start_default: boolean;
   blockers: string[];
+  preview: { enabled: boolean; host: string | null; ports: string };
   agent: {
     claude_token: boolean;
     github_token: boolean;
@@ -186,6 +239,14 @@ export const api = {
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),
+  files: (id: string, path: string) =>
+    request<Browse>("GET", `/sandboxes/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path)}`),
+  runDiff: (runId: string) => request<RunDiff>("GET", `/runs/${encodeURIComponent(runId)}/diff`),
+  preview: (id: string) => request<PreviewStatus>("GET", `/sandboxes/${encodeURIComponent(id)}/preview`),
+  startStatic: (id: string) => request<PreviewStatus>("POST", `/sandboxes/${encodeURIComponent(id)}/preview/static`),
+  stopStatic: (id: string) => request<PreviewStatus>("DELETE", `/sandboxes/${encodeURIComponent(id)}/preview/static`),
+  measure: (id: string) => request<{ workspace_bytes: number | null }>("POST", `/sandboxes/${encodeURIComponent(id)}/measure`),
+  prune: () => request<PruneResult>("POST", "/system/prune"),
   audit: (beforeId?: number, limit = 100) =>
     request<AuditEntry[]>("GET", `/audit?limit=${limit}${beforeId ? `&before_id=${beforeId}` : ""}`),
 };

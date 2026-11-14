@@ -142,6 +142,19 @@ def client_ip(conn: Request | WebSocket) -> str:
 # Dependencies
 # ---------------------------------------------------------------------------
 
+def on_preview_host(conn: Request | WebSocket) -> bool:
+    """True when the request came in on the hostname reserved for previews. Agent Hub never
+    issues or accepts a session there, so preview servers never see one."""
+    host = (conn.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower().rstrip(".")
+    preview = config.settings.preview_host.lower().rstrip(".")
+    return bool(preview) and host == preview
+
+
+def require_not_preview_host(request: Request) -> None:
+    if on_preview_host(request):
+        raise HTTPException(403, "This hostname is reserved for previews. Open Agent Hub by its IP address instead.")
+
+
 def require_configured() -> None:
     if not configured():
         raise HTTPException(503, "Admin login isn't set up. Run: python -m app.set_password")
@@ -154,6 +167,7 @@ def require_csrf(request: Request) -> None:
 
 
 def require_admin(request: Request) -> None:
+    require_not_preview_host(request)
     require_configured()
     if request.method not in ("GET", "HEAD"):
         require_csrf(request)
@@ -164,6 +178,6 @@ def require_admin(request: Request) -> None:
 def ws_allowed(ws: WebSocket) -> bool:
     """Cookie plus a same-origin check: WebSockets ignore SameSite on some browsers and have no CORS."""
     origin = ws.headers.get("origin")
-    if not origin or urlsplit(origin).netloc != ws.headers.get("host"):
+    if not origin or urlsplit(origin).netloc != ws.headers.get("host") or on_preview_host(ws):
         return False
     return token_valid(ws.cookies.get(COOKIE))

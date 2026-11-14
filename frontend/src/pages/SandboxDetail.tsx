@@ -6,12 +6,18 @@ import { usePoll } from "../lib/usePoll";
 import { Dialog, Icon, StatusBadge, useToast } from "../components/ui";
 import Terminal from "../components/Terminal";
 import Runs from "../components/Runs";
+import Files from "../components/Files";
+import Changes from "../components/Changes";
+import Preview from "../components/Preview";
 
-type Tab = "runs" | "terminal" | "settings";
-const LATER: { label: string; phase: number }[] = [
-  { label: "Files", phase: 4 },
-  { label: "Changes", phase: 4 },
-  { label: "Preview", phase: 4 },
+type Tab = "runs" | "changes" | "files" | "terminal" | "preview" | "settings";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "runs", label: "Runs" },
+  { id: "changes", label: "Changes" },
+  { id: "files", label: "Files" },
+  { id: "terminal", label: "Terminal" },
+  { id: "preview", label: "Preview" },
+  { id: "settings", label: "Settings" },
 ];
 
 export default function SandboxDetail({ id }: { id: string }) {
@@ -81,7 +87,10 @@ export default function SandboxDetail({ id }: { id: string }) {
       </div>
       <div className="detail-meta">
         <span>{sb.template}</span>
-        <span>{bytes(sb.memory)} · {sb.cpus} CPU</span>
+        <span>
+          {sb.memory_usage != null ? `${bytes(sb.memory_usage)} of ` : ""}{bytes(sb.memory)} · {sb.cpus} CPU
+        </span>
+        {sb.workspace_bytes != null && <span>workspace {bytes(sb.workspace_bytes)}</span>}
         {repo && <span>{repo}</span>}
         <span>created {ago(sb.created_at)}</span>
         <span>id {sb.id}</span>
@@ -93,24 +102,17 @@ export default function SandboxDetail({ id }: { id: string }) {
       )}
 
       <div className="tabs" role="tablist">
-        <button className="tab" role="tab" aria-selected={tab === "runs"} onClick={() => setTab("runs")}>
-          Runs
-        </button>
-        <button className="tab" role="tab" aria-selected={tab === "terminal"} onClick={() => setTab("terminal")}>
-          <Icon name="terminal" size={14} /> Terminal
-        </button>
-        {LATER.map((t) => (
-          <button key={t.label} className="tab" role="tab" aria-selected={false} disabled
-            title={`Arrives in phase ${t.phase}`}>
-            {t.label} <span className="soon">P{t.phase}</span>
+        {TABS.map((t) => (
+          <button key={t.id} className="tab" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+            {t.id === "terminal" && <Icon name="terminal" size={14} />} {t.label}
           </button>
         ))}
-        <button className="tab" role="tab" aria-selected={tab === "settings"} onClick={() => setTab("settings")}>
-          Settings
-        </button>
       </div>
 
       {tab === "runs" && <Runs sb={sb} system={system} />}
+      {tab === "changes" && <Changes sb={sb} />}
+      {tab === "files" && <Files sb={sb} />}
+      {tab === "preview" && <Preview sb={sb} />}
       {/* Kept mounted on other tabs so the shell survives a tab switch. */}
       {termOpened && (
         <div style={{ display: tab === "terminal" ? "flex" : "none", flex: 1, minHeight: 0 }}>

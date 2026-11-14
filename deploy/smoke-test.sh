@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Acceptance checks (phases 1-2), run on the server after install.sh and set_password.
+# Acceptance checks (phases 1-4), run on the server after install.sh and set_password.
 # Talks to the API over the Tailscale address with curl, like a remote client would.
 #   bash deploy/smoke-test.sh [base-url]
 # Prompts for the admin password and (once) for sudo, to show `docker inspect` as agenthub.
@@ -52,8 +52,14 @@ if grep -qE '^  (PASS|FAIL)' <<<"$out"; then
 else
   bad "terminal check crashed: $out"
 fi
-api "$BASE/api/audit?limit=10" | python3 -c 'import json,sys; a=[e["action"] for e in json.load(sys.stdin)]; sys.exit(0 if "terminal.open" in a and "terminal.close" in a else 1)' \
-  && ok "terminal session is in the audit log" || bad "terminal session missing from audit log"
+# terminal.close is written after the shell has been killed, a moment after the socket closes.
+audited=1
+for _ in $(seq 1 20); do
+  api "$BASE/api/audit?limit=10" | python3 -c 'import json,sys; a=[e["action"] for e in json.load(sys.stdin)]; sys.exit(0 if "terminal.open" in a and "terminal.close" in a else 1)' \
+    && { audited=0; break; }
+  sleep 0.5
+done
+[[ $audited -eq 0 ]] && ok "terminal session is in the audit log" || bad "terminal session missing from audit log"
 
 echo "-- limits (docker inspect as agenthub)"
 AUID=$(id -u agenthub)
@@ -81,6 +87,30 @@ TARGETS+=("10.0.2.2:25575" "10.0.2.2:8080" "169.254.169.254:80" "192.168.0.1:80"
 for t in "${TARGETS[@]}"; do
   if sx "nc -z -w 3 ${t%:*} ${t#*:}" >/dev/null; then bad "reached $t (must be blocked)"; else ok "blocked $t"; fi
 done
+
+echo "-- preview"
+PV=$(api "$BASE/api/sandboxes/$SID/preview")
+PURL=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("url") or "")' "$PV")
+PPORT=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("host_port") or "")' "$PV")
+if [[ -z $PURL ]]; then
+  bad "no preview for this sandbox (PREVIEW_BIND/PREVIEW_HOST unset?): $PV"
+else
+  sx "echo '<h1>agent hub preview</h1>' > /workspace/index.html" >/dev/null
+  api "${CSRF[@]}" -X POST "$BASE/api/sandboxes/$SID/preview/static" >/dev/null
+  body=""
+  for _ in $(seq 1 20); do body=$(curl -s --max-time 3 "$PURL" || true); [[ $body == *"agent hub preview"* ]] && break; sleep 0.5; done
+  [[ $body == *"agent hub preview"* ]] && ok "preview served at $PURL" || bad "preview not reachable at $PURL"
+  TSIP=$(tailscale ip -4 | head -1)
+  [[ $(curl -s --max-time 3 "http://$TSIP:$PPORT/") == *"agent hub preview"* ]] && ok "preview on the Tailscale IP" || bad "preview not on $TSIP:$PPORT"
+  for other in 127.0.0.1 $(hostname -I | tr ' ' '\n' | grep -v "^$TSIP$" | grep -v ':'); do
+    if curl -s --max-time 2 -o /dev/null "http://$other:$PPORT/"; then bad "preview also answers on $other:$PPORT"; else ok "preview not exposed on $other"; fi
+  done
+  PHOST=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "$PURL")
+  c=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PHOST:8090" "${CSRF[@]}" -H 'Content-Type: application/json' \
+       -X POST "$BASE/api/auth/login" -d '{"password":"x"}')
+  [[ $c == 403 ]] && ok "no logins on the preview hostname" || bad "login on preview hostname returned $c"
+  api "${CSRF[@]}" -X DELETE "$BASE/api/sandboxes/$SID/preview/static" >/dev/null
+fi
 
 echo "-- destroy"
 c=$(code "${CSRF[@]}" -X DELETE "$BASE/api/sandboxes/$SID")

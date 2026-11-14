@@ -29,6 +29,7 @@ class RunSpec:
     timeout: int
     max_turns: int
     branch: str
+    preview_port: int = 8000
 
 
 @dataclass
@@ -152,7 +153,9 @@ SYSTEM_PROMPT = (
     "Work in /workspace, a git repository already checked out on branch {branch}. Stay on this branch; "
     "don't push and don't rewrite history: Agent Hub commits whatever you leave in the working tree "
     "and the owner reviews the diff. Nobody can answer questions during the run, so make reasonable "
-    "decisions, keep changes focused on the request, and finish with a short summary of what you did."
+    "decisions, keep changes focused on the request, and finish with a short summary of what you did. "
+    "If you start a web server for the owner to preview, it must listen on 0.0.0.0 port {preview_port} "
+    "and keep running in the background."
 )
 
 
@@ -194,7 +197,7 @@ class ClaudeCodeRunner(ExecRunner):
                 # The sandbox is the permission boundary: non-root, no capabilities, own volume,
                 # filtered network, no GitHub credential.
                 "--permission-mode", "bypassPermissions",
-                "--append-system-prompt", SYSTEM_PROMPT.format(branch=spec.branch)]
+                "--append-system-prompt", SYSTEM_PROMPT.format(branch=spec.branch, preview_port=spec.preview_port)]
         if config.settings.agent_model:
             argv += ["--model", config.settings.agent_model]
         return argv

@@ -77,6 +77,9 @@ def container_spec(sb: Sandbox, template: Template) -> dict[str, Any]:
         spec["device_write_bps"] = [{"Path": s.io_device, "Rate": s.io_write_bps}]
     if s.container_runtime:
         spec["runtime"] = s.container_runtime
+    if sb.preview_port and s.preview_bind:
+        # Tailscale IP only, never 0.0.0.0.
+        spec["ports"] = {f"{template.preview_port}/tcp": (s.preview_bind, sb.preview_port)}
     return spec
 
 
@@ -99,6 +102,8 @@ class Backend(Protocol):
              env: dict[str, str] | None = None) -> ExecResult: ...
     async def exec_stream(self, container_id: str, argv: list[str], env: dict[str, str]) -> Any: ...
     def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None: ...
+    def memory_usage(self, container_id: str) -> int | None: ...
+    def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]: ...
     def get_file(self, container_id: str, path: str, max_size: int) -> bytes: ...
     async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession: ...
 
@@ -224,6 +229,51 @@ class DockerBackend:
         except ValueError as e:
             raise BackendError(str(e)) from e
 
+    def memory_usage(self, container_id: str) -> int | None:
+        """Memory in use, as `docker stats` counts it (minus reclaimable page cache)."""
+        c = self._managed(container_id)
+        if c is None or c.status != "running":
+            return None
+        st = c.stats(stream=False, one_shot=True).get("memory_stats") or {}
+        usage = st.get("usage")
+        if usage is None:
+            return None
+        inactive = (st.get("stats") or {}).get("inactive_file", 0)
+        return max(0, usage - inactive)
+
+    def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]:
+        """Reclaim disk without touching anything a live sandbox uses or anything Agent Hub
+        didn't create: managed containers/volumes of destroyed sandboxes, sandbox images of
+        older versions no container uses, dangling images and the build cache."""
+        out: dict[str, Any] = {"containers": [], "volumes": [], "images": [], "bytes": 0}
+        managed = {"label": f"{MANAGED_LABEL}=true"}
+        for c in self.client.containers.list(all=True, filters=managed):
+            sid = c.labels.get(SANDBOX_LABEL)
+            if sid and sid not in keep_sandbox_ids:
+                c.remove(force=True)
+                out["containers"].append(c.name)
+        for v in self.client.volumes.list(filters=managed):
+            sid = (v.attrs.get("Labels") or {}).get(SANDBOX_LABEL)
+            if sid and sid not in keep_sandbox_ids:
+                v.remove(force=True)
+                out["volumes"].append(v.name)
+        for img in self.client.images.list(name="agent-hub/*"):
+            tags = [t for t in img.tags if t.startswith("agent-hub/")]
+            if tags and not set(tags) & current_images:
+                try:
+                    self.client.images.remove(img.id)
+                    out["images"] += tags
+                    out["bytes"] += img.attrs.get("Size", 0)
+                except self._docker.errors.APIError:
+                    pass  # still used by a stopped sandbox: keep it
+        r = self.client.images.prune(filters={"dangling": True})
+        out["bytes"] += r.get("SpaceReclaimed") or 0
+        try:
+            out["bytes"] += self.client.api.prune_builds().get("SpaceReclaimed") or 0
+        except self._docker.errors.APIError:
+            pass
+        return out
+
     async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession:
         import asyncio
 
@@ -324,6 +374,17 @@ class FakeBackend:
         self._running(container_id)
         self.stream_calls.append((argv, env))
         return FakeExecStream(list(self.stream_script), self.stream_exit_code)
+
+    def memory_usage(self, container_id: str) -> int | None:
+        c = self._managed(container_id)
+        return 300 * 2**20 if c is not None and c["status"] == "running" else None
+
+    def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]:
+        gone = [cid for cid, c in self.containers.items()
+                if c["labels"].get(MANAGED_LABEL) == "true" and c["labels"].get(SANDBOX_LABEL) not in keep_sandbox_ids]
+        for cid in gone:
+            del self.containers[cid]
+        return {"containers": gone, "volumes": [], "images": [], "bytes": 0}
 
     def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None:
         self._running(container_id)

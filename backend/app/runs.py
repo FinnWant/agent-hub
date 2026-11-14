@@ -20,6 +20,7 @@ from . import config
 from .db import ACTIVE_RUN_STATES, Database, Run
 from .redact import Redactor
 from .runners import AgentRunner, RunProcess, RunSpec
+from .templates import TEMPLATES
 from .sandboxes import CapacityError, InvalidTransition, NotFound, SandboxError, SandboxService
 from .workspace import Workspace, WorkspaceError
 
@@ -105,6 +106,11 @@ class RunManager:
         if problem := agent.problem():
             raise SandboxError(problem)
         host = self.sandboxes.host_state()
+        if host.free_disk < s.min_free_disk:
+            reason = (f"Only {host.free_disk / 2**30:.0f} GB of disk is free; runs need at least "
+                      f"{s.min_free_disk / 2**30:.0f} GB. Try Clean up on the Sandboxes page.")
+            self.db.audit(ip, "run.start", sandbox_id, ok=False, detail={"blocked": [reason]})
+            raise CapacityError([reason])
         if host.mem_available < s.memory_reserve:
             reason = (f"Only {host.mem_available / 2**30:.1f} GB of memory is available; runs need "
                       f"{s.memory_reserve / 2**30:.0f} GB left free for the rest of the server.")
@@ -171,7 +177,8 @@ class RunManager:
     async def _execute(self, run: Run) -> None:
         sb = self.sandboxes.get(run.sandbox_id)
         spec = RunSpec(run_id=run.id, container_id=sb.container_id or "", prompt=run.prompt,
-                       timeout=run.timeout, max_turns=run.max_turns, branch=run.branch or "")
+                       timeout=run.timeout, max_turns=run.max_turns, branch=run.branch or "",
+                       preview_port=TEMPLATES[sb.template].preview_port)
         state, error, outcome = "failed", None, None
         self._status(run, "running", started_at=time.time())
         try:

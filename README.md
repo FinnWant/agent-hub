@@ -7,8 +7,8 @@ Each sandbox is a locked-down container with its own workspace volume. An agent 
 in non-interactive mode, behind a pluggable runner) works on a branch inside it; you watch the
 stream live, review the diff, and approve. Nothing is exposed to the public internet.
 
-> **Status:** Phase 3 — agent runs: give Claude Code a task in a sandbox, watch it live, get a
-> commit on an `agent/<run-id>` branch. Files, diff review and previews come in phase 4.
+> **Status:** Phase 4 — review an agent's work as a diff, browse its files, and open a dev
+> server running in a sandbox from any device on your tailnet. Desktop app comes in phase 5.
 
 ## Architecture
 
@@ -55,8 +55,9 @@ bash deploy/smoke-test.sh                         # API + terminal acceptance ch
 bash deploy/integration-test.sh                   # Docker integration tests, as agenthub
 ```
 
-Add the port (`tcp:8090`) to your Tailscale ACL so your devices can reach it, then open
-`http://<server>:8090` in a browser on your tailnet.
+Add the ports (`tcp:8090` and, for previews, `tcp:8200-8299`) to your Tailscale ACL so your
+devices can reach them, then open `http://<tailscale-ip>:8090` in a browser on your tailnet.
+Use the IP, not the MagicDNS name: that name is reserved for previews (see below).
 
 ### Agent credentials
 
@@ -85,12 +86,22 @@ sudo systemctl restart agent-hub
   The log streams live (messages, tool calls, results, cost and turns); cancel at any time.
   Each run gets its own branch `agent/<run-id>` from the sandbox's base branch, and whatever
   the agent leaves is committed there. Run history is kept per sandbox.
+- **Sandbox → Changes:** a run's branch against the point where it left the base branch,
+  as a unified or split diff with per-file line counts.
+- **Sandbox → Files:** a read-only tree and viewer for `/workspace` (text up to 512 KB;
+  binaries and links are labelled, never followed).
+- **Sandbox → Preview:** the sandbox's preview link, whether anything is listening (and on
+  which address), a one-click static file server for `/workspace`, and dev-server commands for
+  the template.
 - **Sandbox → Terminal:** a real shell (`bash -l` as `agent` in `/workspace`) over a
   WebSocket, rendered with xterm.js. Resizes with the window; the shell and everything it
   started are killed when you close the tab or reconnect. Idle shells close after an hour.
 - **Sandbox → Settings:** push agent branches to GitHub (off by default), limits and isolation
   summary, destroy (type the name to confirm).
 - **Audit log:** every login, sandbox action and terminal session, filterable.
+- **Resources:** memory in use per sandbox (every 15 s) and workspace size (every 5 min, at
+  low priority). **Clean up** removes old sandbox images, the build cache and anything left
+  behind by destroyed sandboxes; it never touches a sandbox you haven't destroyed.
 
 The UI follows the *Kiln* design system (dark slate, matte surfaces, ember reserved for the
 primary action) and works at phone width.
@@ -128,6 +139,10 @@ curl -b jar $API/audit
 | `GET` / `POST /api/sandboxes/{id}/runs` | Run history / start a run (`prompt`, `timeout_minutes`, `max_turns`) |
 | `GET /api/runs/{id}` · `GET /api/runs/{id}/log` · `POST /api/runs/{id}/cancel` | Run detail, stored events, cancel |
 | `WS /api/runs/{id}/events` | Backlog then live events, batched every 150 ms, as `{"events": [...]}` |
+| `GET /api/sandboxes/{id}/files?path=` | Directory listing or file content (read-only, capped) |
+| `GET /api/runs/{id}/diff` | The run's branch vs its base: per-file counts and the patch |
+| `GET /api/sandboxes/{id}/preview` · `POST`/`DELETE …/preview/static` | Preview status; static file server |
+| `POST /api/sandboxes/{id}/measure` · `POST /api/system/prune` | Measure workspace now; clean up disk |
 | `GET /api/audit` | Audit log, newest first |
 
 ## Development
@@ -175,6 +190,18 @@ queued → running → succeeded | failed | cancelled | timed_out
 Every log line is redacted for known secrets (and common token shapes) before it is stored or
 streamed.
 
+## Previews
+
+Each sandbox gets a host port from `PREVIEW_PORT_RANGE` (8200–8299) when it is created, mapped
+to its template's port (8000 python, 5173 node, 3000 static). It is published on the
+**Tailscale IP only** (`PREVIEW_BIND`), never `0.0.0.0`, and ufw allows the range only on
+`tailscale0`. A dev server must listen on `0.0.0.0` inside the sandbox.
+
+Preview links use the server's MagicDNS name (`PREVIEW_HOST`), and Agent Hub refuses logins
+and API calls on that name. Browsers send a host's cookies to *every* port on it, so if you
+opened Agent Hub and a preview on the same hostname, code the agent wrote could read your
+session cookie. With different hostnames it never gets one.
+
 ## Security model
 
 Agent Hub runs code written by an AI model, which may in turn have read untrusted text
@@ -191,8 +218,9 @@ Agent Hub runs code written by an AI model, which may in turn have read untruste
 - Agent Hub only touches containers labelled `agent-hub.managed=true`.
 
 **Network**
-- The API listens only on localhost and the Tailscale/LAN interface; nothing is added to the
-  router or any public tunnel.
+- The API listens only on localhost and the Tailscale/LAN interface; previews only on the
+  Tailscale IP, on a hostname that never holds a session. Nothing is added to the router or
+  any public tunnel.
 - Sandboxes can reach the internet (package registries, GitHub, the model API) but **not**
   the home LAN, the Tailscale network, link-local addresses or the host's own services.
   Because rootless container traffic leaves the host as ordinary traffic from the
@@ -237,8 +265,8 @@ action including terminal open/close.
 0. Preparation — Docker, caps, scaffold ✓
 1. Sandbox API — templates, lifecycle, limits, egress rules, auth, audit log, systemd ✓
 2. Live terminal and minimal web UI ✓
-3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction *(current)*
-4. Files, diff review, previews, disk checks, phone layout
+3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction ✓
+4. Files, diff review, previews, resource display, disk checks and clean-up, phone layout *(current)*
 5. Tauri desktop app with native notifications
 
 **Later:** gVisor, egress domain allowlist, opening pull requests, multiple runners, run

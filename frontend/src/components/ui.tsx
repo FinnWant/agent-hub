@@ -137,6 +137,8 @@ const paths = {
   logout: "M6 3H3.5v10H6M10 5l3 3-3 3M13 8H6",
   refresh: "M12.5 6A5 5 0 1 0 13 9M12.5 2.5V6H9",
   clear: "M4 4l8 8M12 4l-8 8",
+  external: "M9.5 3H13v3.5M13 3L7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5",
+  broom: "M10.5 2.5L7 8M4 8.5h6l1 5H3zM6 11v2.5M8 11v2.5",
 };
 
 export function Icon({ name, size = 16 }: { name: keyof typeof paths; size?: number }) {

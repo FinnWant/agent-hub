@@ -4,7 +4,8 @@ const MiB = 2 ** 20;
 export function bytes(n: number, digits = 1): string {
   if (n >= GiB) return `${(n / GiB).toFixed(n % GiB === 0 ? 0 : digits)} GB`;
   if (n >= MiB) return `${Math.round(n / MiB)} MB`;
-  return `${Math.round(n / 1024)} KB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
 }
 
 export function gib(n: number, digits = 1): string {

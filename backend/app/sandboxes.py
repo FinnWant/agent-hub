@@ -96,6 +96,14 @@ class SandboxService:
             return self.db.update_sandbox(sb, state="error", error="Container no longer exists")
         return sb
 
+    def _free_preview_port(self) -> int | None:
+        """Lowest port in the pool not held by a sandbox that still exists. None when previews
+        are off or the pool is used up (the sandbox then works without a preview)."""
+        if not config.settings.previews_enabled:
+            return None
+        used = {sb.preview_port for sb in self.db.list_sandboxes()}
+        return next((p for p in config.settings.preview_ports if p not in used), None)
+
     def blockers(self, memory: int, exclude: str | None = None) -> list[str]:
         running = [sb.memory for sb in self.running() if sb.id != exclude]
         return start_blockers(memory, running, self.host_state())
@@ -122,7 +130,8 @@ class SandboxService:
                 raise CapacityError(reasons)
             sid = secrets.token_hex(6)
             sb = Sandbox(id=sid, name=name, template=template, volume=f"ah-{sid}", memory=memory,
-                         cpus=cpus, repo_url=repo_url, base_branch=base_branch)
+                         cpus=cpus, repo_url=repo_url, base_branch=base_branch,
+                         preview_port=self._free_preview_port())
             self.db.insert_sandbox(sb)
             try:
                 cid = self.backend.create(sb, tpl)

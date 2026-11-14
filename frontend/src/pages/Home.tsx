@@ -3,7 +3,7 @@ import { api, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago, bytes, gib, repoLabel } from "../lib/format";
 import { navigate, useTitle } from "../lib/router";
 import { usePoll } from "../lib/usePoll";
-import { Icon, Kbd, StatusDot, useToast } from "../components/ui";
+import { Dialog, Icon, Kbd, StatusDot, useToast } from "../components/ui";
 import NewSandboxDialog from "../components/NewSandboxDialog";
 
 export default function Home() {
@@ -145,8 +145,9 @@ function HostPanel({ system }: { system: SystemInfo | null }) {
           <div className="bar">
             <span className={lowDisk ? "seg-warn" : "seg-sandbox"} style={{ width: pct(diskUsed, host.disk_total) }} />
           </div>
-          <div className="legend">
-            <span>New sandboxes need {gib(caps.min_free_disk, 0)} GB free</span>
+          <div className="legend" style={{ alignItems: "center" }}>
+            <span>New sandboxes and runs need {gib(caps.min_free_disk, 0)} GB free</span>
+            <CleanUp />
           </div>
         </div>
       </div>
@@ -163,6 +164,50 @@ function HostPanel({ system }: { system: SystemInfo | null }) {
         </div>
       )}
     </section>
+  );
+}
+
+function CleanUp() {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  const run = async () => {
+    setBusy(true);
+    try {
+      const r = await api.prune();
+      const parts = [
+        r.bytes ? `${bytes(r.bytes)} freed` : "nothing to free",
+        r.images.length ? `${r.images.length} old image${r.images.length === 1 ? "" : "s"}` : "",
+        r.containers.length + r.volumes.length ? `${r.containers.length + r.volumes.length} leftovers` : "",
+      ].filter(Boolean);
+      toast("success", `Clean up: ${parts.join(", ")}`);
+      setConfirming(false);
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto", height: 22 }} onClick={() => setConfirming(true)}>
+        Clean up
+      </button>
+      {confirming && (
+        <Dialog title="Clean up disk space?" onClose={() => setConfirming(false)}
+          description="Removes Docker data no sandbox needs. Sandboxes you haven't destroyed, and their workspaces, are never touched."
+          footer={<>
+            <button className="btn btn-ghost" onClick={() => setConfirming(false)}>Cancel</button>
+            <button className="btn btn-primary" disabled={busy} onClick={run}>{busy ? "Cleaning…" : "Clean up"}</button>
+          </>}>
+          <ul style={{ margin: 0, paddingLeft: 18, color: "var(--text-secondary)" }}>
+            <li>Sandbox images from older versions that no sandbox uses</li>
+            <li>Untagged images and the image build cache</li>
+            <li>Containers and volumes left behind by destroyed sandboxes</li>
+          </ul>
+        </Dialog>
+      )}
+    </>
   );
 }
 
@@ -243,7 +288,8 @@ function SandboxList({
               </div>
             </div>
             <div className="row-meta hide-sm">
-              {sb.memory_human.toUpperCase()} · {sb.cpus} CPU
+              {sb.memory_usage != null ? `${bytes(sb.memory_usage)} / ` : ""}{sb.memory_human.toUpperCase()} · {sb.cpus} CPU
+              {sb.workspace_bytes != null && <div className="row-res">disk {bytes(sb.workspace_bytes)}</div>}
               <div className="row-sub">{ago(sb.created_at)}</div>
             </div>
             <div className="row-actions">

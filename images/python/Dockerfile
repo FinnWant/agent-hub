@@ -25,6 +25,12 @@ ENV DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
     DISABLE_ERROR_REPORTING=1
 
+# busybox provides `httpd` for the one-click static preview server (separate layer, so the
+# Claude Code layer above stays cached).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends busybox \
+ && rm -rf /var/lib/apt/lists/*
+
 USER agent
 WORKDIR /workspace
 ENV PATH=/home/agent/.local/bin:$PATH \
