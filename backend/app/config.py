@@ -61,7 +61,7 @@ class Settings:
     # Network. Each host is bound with IP_FREEBIND, so the Tailscale IP may come up after us.
     bind_hosts: list[str] = field(default_factory=lambda: _list("BIND_HOSTS", "127.0.0.1"))
     port: int = _int("PORT", 8090)
-    # The address you open Agent Hub at, when it sits behind HTTPS (`tailscale serve`), e.g.
+    # The address you open Kiln at, when it sits behind HTTPS (`tailscale serve`), e.g.
     # https://myserver.tailnet.ts.net. Enables Secure cookies, the installable app and Web Push.
     public_url: str = os.getenv("PUBLIC_URL", "").rstrip("/")
     # Behind `tailscale serve` (requests arrive from 127.0.0.1): take the client's address from
@@ -72,7 +72,7 @@ class Settings:
     # Previews are published on this address only (the Tailscale IP; never 0.0.0.0) ...
     preview_bind: str = os.getenv("PREVIEW_BIND", "")
     # ... and linked by this hostname (MagicDNS), which must differ from the one you use for
-    # Agent Hub: browsers send cookies to every port of a host, so a preview on the same host
+    # Kiln: browsers send cookies to every port of a host, so a preview on the same host
     # would receive the session cookie. Logins on this hostname are refused.
     preview_host: str = os.getenv("PREVIEW_HOST", "")
 
@@ -126,7 +126,7 @@ class Settings:
     run_max_turns_max: int = _int("RUN_MAX_TURNS_MAX", 500)
     run_max_events: int = _int("RUN_MAX_EVENTS", 20_000)  # per run; later output is dropped
     agent_model: str = os.getenv("AGENT_MODEL", "")  # empty = the CLI's default model
-    git_author_name: str = os.getenv("AGENT_GIT_NAME", "Agent Hub")
+    git_author_name: str = os.getenv("AGENT_GIT_NAME", "Kiln")
     git_author_email: str = os.getenv("AGENT_GIT_EMAIL", "agent-hub@users.noreply.github.com")
 
     # Secrets (only in .env, mode 600; set with: python -m app.set_secret). Never sent to the

@@ -1,6 +1,6 @@
 {
-  "name": "Agent Hub",
-  "short_name": "Agent Hub",
+  "name": "Kiln",
+  "short_name": "Kiln",
   "description": "Sandboxed coding agents on your server",
   "start_url": "/",
   "scope": "/",

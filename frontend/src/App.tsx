@@ -57,7 +57,7 @@ export default function App() {
         <nav className="sidebar" aria-label="Main">
           <a href="/" className="brand">
             <span className="brand-mark" aria-hidden />
-            <span>Agent Hub</span>
+            <span>Kiln</span>
           </a>
           <a href="/" className="nav-item" aria-current={route.name === "home" || route.name === "sandbox" ? "page" : undefined}>
             <Icon name="box" /> Sandboxes

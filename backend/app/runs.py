@@ -160,7 +160,7 @@ class RunManager:
                 pass
 
     def reconcile_on_startup(self) -> None:
-        """Runs that were active when Agent Hub stopped can't be followed any more: stop them."""
+        """Runs that were active when Kiln stopped can't be followed any more: stop them."""
         from .runners import kill_argv
 
         for run in self.db.list_runs(states=ACTIVE_RUN_STATES, limit=1000):
@@ -170,7 +170,7 @@ class RunManager:
                     self.sandboxes.backend.exec(sb.container_id, kill_argv(run.id), 30)
                 except Exception:  # noqa: BLE001
                     pass
-            self.db.update_run(run, state="failed", error="Agent Hub restarted during the run",
+            self.db.update_run(run, state="failed", error="Kiln restarted during the run",
                                finished_at=time.time())
 
     # ---- the run itself --------------------------------------------------------

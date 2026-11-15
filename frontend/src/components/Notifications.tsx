@@ -112,12 +112,12 @@ export default function NotificationsDialog({ onClose }: { onClose: () => void }
 
       {mode === "ios-install" && (
         <div className="install-steps">
-          <strong>Add Agent Hub to your Home Screen first</strong>
+          <strong>Add Kiln to your Home Screen first</strong>
           <p className="muted">iPhone only allows notifications for web apps opened from the Home Screen.</p>
           <ol>
             <li>Tap the <b>Share</b> button in Safari.</li>
             <li>Choose <b>Add to Home Screen</b>, then <b>Add</b>.</li>
-            <li>Open <b>Agent Hub</b> from your Home Screen and log in.</li>
+            <li>Open <b>Kiln</b> from your Home Screen and log in.</li>
             <li>Come back here (bell icon) and tap <b>Turn on</b>.</li>
           </ol>
         </div>
@@ -126,7 +126,7 @@ export default function NotificationsDialog({ onClose }: { onClose: () => void }
       {mode === "insecure" && (
         <div className="banner banner-warning">
           <div>
-            <strong>Push notifications need HTTPS.</strong> Open Agent Hub at its https:// address (set up by the
+            <strong>Push notifications need HTTPS.</strong> Open Kiln at its https:// address (set up by the
             installer with <span className="mono">tailscale serve</span>).
           </div>
         </div>
@@ -140,7 +140,7 @@ export default function NotificationsDialog({ onClose }: { onClose: () => void }
             <strong>This device · {deviceLabel()}</strong>
             <p>
               {thisDeviceOn ? "Notifications are on."
-                : info.available ? "Get notified even when Agent Hub isn't open."
+                : info.available ? "Get notified even when Kiln isn't open."
                 : "Not available until the server runs on HTTPS (re-run install.sh after enabling HTTPS in Tailscale)."}
             </p>
           </div>

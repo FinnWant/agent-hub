@@ -47,7 +47,7 @@ class WorkspaceError(Exception):
 class Finalized:
     commit_sha: str | None
     commits: int        # commits on the run branch beyond the base
-    committed_now: bool  # Agent Hub made a commit of leftover changes
+    committed_now: bool  # Kiln made a commit of leftover changes
 
 
 class Workspace(Protocol):
@@ -126,7 +126,7 @@ class GitWorkspace:
 
     def _sh(self, sb: Sandbox, script: str, env: dict[str, str] | None = None, timeout: int = 300) -> str:
         s = config.settings
-        # Agent Hub's own commits (initial commit, saving the agent's work) always carry this
+        # Kiln's own commits (initial commit, saving the agent's work) always carry this
         # identity; the sandbox user has none for git to fall back on.
         ident = {"GIT_AUTHOR_NAME": s.git_author_name, "GIT_AUTHOR_EMAIL": s.git_author_email,
                  "GIT_COMMITTER_NAME": s.git_author_name, "GIT_COMMITTER_EMAIL": s.git_author_email}

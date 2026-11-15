@@ -85,7 +85,7 @@ def seed_demo(svc: SandboxService) -> None:
             log.info("demo seed skipped %s: %s", name, e)
 
 
-app = FastAPI(title="Agent Hub", version=__version__, lifespan=lifespan,
+app = FastAPI(title="Kiln", version=__version__, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 Admin = Annotated[None, Depends(auth.require_admin)]
 
@@ -466,7 +466,7 @@ class PushSubscription(BaseModel):
 @app.post("/api/push/subscribe", status_code=201)
 def push_subscribe(body: PushSubscription, _: Admin, request: Request, notifier: Notif) -> dict:
     if not config.settings.https:
-        raise HTTPException(400, "Push notifications need Agent Hub on HTTPS (PUBLIC_URL)")
+        raise HTTPException(400, "Push notifications need Kiln on HTTPS (PUBLIC_URL)")
     if not push_endpoint_ok(body.endpoint):
         raise HTTPException(400, "Not a recognised push service")
     p256dh, key = body.keys.get("p256dh", ""), body.keys.get("auth", "")
@@ -492,7 +492,7 @@ def push_unsubscribe(body: PushUnsubscribe, _: Admin, request: Request, notifier
 
 @app.post("/api/push/test")
 async def push_test(_: Admin, notifier: Notif) -> dict:
-    ev = {"kind": "test", "title": "Agent Hub", "body": "Notifications work on this device.", "url": "/"}
+    ev = {"kind": "test", "title": "Kiln", "body": "Notifications work on this device.", "url": "/"}
     notifier.publish(ev, push=False)  # open windows and the Windows app; push is sent below
     if not config.settings.https:
         return {"sent": 0, "removed": 0, "failed": 0}

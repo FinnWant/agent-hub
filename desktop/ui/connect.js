@@ -1,4 +1,4 @@
-// First-run screen: remember the Agent Hub server and open it. Runs only inside the app.
+// First-run screen: remember the Kiln server and open it. Runs only inside the app.
 const form = document.getElementById("connect");
 const input = document.getElementById("url");
 const error = document.getElementById("error");

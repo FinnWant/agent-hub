@@ -56,6 +56,6 @@ export function useLinkInterception() {
 
 export function useTitle(title: string) {
   useEffect(() => {
-    document.title = title ? `${title} · Agent Hub` : "Agent Hub";
+    document.title = title ? `${title} · Kiln` : "Kiln";
   }, [title]);
 }

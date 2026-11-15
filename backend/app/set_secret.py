@@ -40,7 +40,7 @@ def main(argv: list[str]) -> int:
     key, label = SECRETS[args[0]]
     path = Path(args[1]) if len(args) > 1 else DEFAULT_ENV if DEFAULT_ENV.exists() else Path(".env")
     if not path.exists():
-        print(f"{path} not found. Pass the path to Agent Hub's .env.", file=sys.stderr)
+        print(f"{path} not found. Pass the path to Kiln's .env.", file=sys.stderr)
         return 1
 
     value = "" if clear else getpass.getpass(f"{label}: ").strip()

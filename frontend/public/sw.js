@@ -1,4 +1,4 @@
-// Agent Hub service worker: shows Web Push notifications and opens the app when one is tapped.
+// Kiln service worker: shows Web Push notifications and opens the app when one is tapped.
 // It deliberately caches nothing, so the app always loads fresh from the server.
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
@@ -11,7 +11,7 @@ self.addEventListener("push", (event) => {
     d = { body: event.data ? event.data.text() : "" };
   }
   event.waitUntil(
-    self.registration.showNotification(d.title || "Agent Hub", {
+    self.registration.showNotification(d.title || "Kiln", {
       body: d.body || "",
       icon: "/icons/icon-192.png",
       badge: "/icons/icon-192.png",

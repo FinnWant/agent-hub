@@ -96,7 +96,7 @@ def test_clone_branch_commit_push(env, origin, monkeypatch):
     fin = w.finalize(sb, r, logs.append)
     assert fin.committed_now and fin.commits == 1
     assert git("log", "-1", "--format=%an <%ae>%n%s", cwd=b.ws).splitlines() == [
-        "Agent Hub <agent-hub@users.noreply.github.com>", "Agent run 0123456789ab: Add a README section"]
+        "Kiln <agent-hub@users.noreply.github.com>", "Agent run 0123456789ab: Add a README section"]
 
     # The agent plants traps in its repo; none of them may matter for the push.
     marker = b.root / "hook-ran"

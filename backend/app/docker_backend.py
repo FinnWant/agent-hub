@@ -1,8 +1,8 @@
 """Container operations. `DockerBackend` talks to the real (rootless) daemon; `FakeBackend`
 backs tests and DEMO_MODE.
 
-Safety rule: every container and volume Agent Hub creates carries MANAGED_LABEL, and every
-operation on an existing container first checks for it, so Agent Hub can never stop or
+Safety rule: every container and volume Kiln creates carries MANAGED_LABEL, and every
+operation on an existing container first checks for it, so Kiln can never stop or
 remove something it didn't create.
 """
 
@@ -30,7 +30,7 @@ class BackendError(RuntimeError):
 
 
 class NotManaged(BackendError):
-    """The container exists but wasn't created by Agent Hub."""
+    """The container exists but wasn't created by Kiln."""
 
 
 @dataclass
@@ -133,7 +133,7 @@ class DockerBackend:
         except self._docker.errors.NotFound:
             return None
         if c.labels.get(MANAGED_LABEL) != "true":
-            raise NotManaged(f"Container {container_id[:12]} is not managed by Agent Hub")
+            raise NotManaged(f"Container {container_id[:12]} is not managed by Kiln")
         return c
 
     def ping(self) -> bool:
@@ -179,7 +179,7 @@ class DockerBackend:
         except self._docker.errors.NotFound:
             return
         if (v.attrs.get("Labels") or {}).get(MANAGED_LABEL) != "true":
-            raise NotManaged(f"Volume {volume} is not managed by Agent Hub")
+            raise NotManaged(f"Volume {volume} is not managed by Kiln")
         v.remove(force=True)
 
     def status(self, container_id: str) -> str:
@@ -262,7 +262,7 @@ class DockerBackend:
         return ports
 
     def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]:
-        """Reclaim disk without touching anything a live sandbox uses or anything Agent Hub
+        """Reclaim disk without touching anything a live sandbox uses or anything Kiln
         didn't create: managed containers/volumes of destroyed sandboxes, sandbox images of
         older versions no container uses, dangling images and the build cache."""
         out: dict[str, Any] = {"containers": [], "volumes": [], "images": [], "bytes": 0}
@@ -338,13 +338,13 @@ class FakeBackend:
         return set(self.foreign_ports)
 
     def add_foreign_container(self, container_id: str) -> None:
-        """Simulate a container Agent Hub didn't create (e.g. something else on the host)."""
+        """Simulate a container Kiln didn't create (e.g. something else on the host)."""
         self.containers[container_id] = {"status": "running", "labels": {}}
 
     def _managed(self, container_id: str) -> dict[str, Any] | None:
         c = self.containers.get(container_id)
         if c is not None and c["labels"].get(MANAGED_LABEL) != "true":
-            raise NotManaged(f"Container {container_id[:12]} is not managed by Agent Hub")
+            raise NotManaged(f"Container {container_id[:12]} is not managed by Kiln")
         return c
 
     def create(self, sb: Sandbox, template: Template) -> str:

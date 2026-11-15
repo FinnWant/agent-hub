@@ -36,7 +36,7 @@ export default function Login({
       <form className="card login-card" onSubmit={submit}>
         <div className="brand">
           <span className="brand-mark" aria-hidden />
-          <span>Agent Hub</span>
+          <span>Kiln</span>
         </div>
         <p>Sandboxed coding agents on your server.</p>
         {unconfigured ? (

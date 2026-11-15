@@ -1,4 +1,4 @@
-//! Agent Hub for Windows: the server's web UI in a native window, with native notifications
+//! Kiln for Windows: the server's web UI in a native window, with native notifications
 //! and a tray icon so notifications keep arriving when the window is closed.
 //!
 //! Security model:
@@ -140,14 +140,14 @@ fn change_server(app: &AppHandle) {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Agent Hub", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Kiln", true, None::<&str>)?;
     let change = MenuItem::with_id(app, "change", "Change server…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&open, &change, &sep, &quit])?;
     TrayIconBuilder::with_id("tray")
         .icon(app.default_window_icon().cloned().expect("app icon"))
-        .tooltip("Agent Hub")
+        .tooltip("Kiln")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
@@ -190,7 +190,7 @@ pub fn run() {
 
             let nav_handle = handle.clone();
             let win = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
-                .title("Agent Hub")
+                .title("Kiln")
                 .inner_size(1280.0, 860.0)
                 .min_inner_size(420.0, 560.0)
                 .on_navigation(move |target| {
@@ -228,7 +228,7 @@ pub fn run() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running Agent Hub");
+        .expect("error while running Kiln");
 }
 
 #[cfg(test)]

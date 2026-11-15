@@ -178,7 +178,7 @@ def test_subscribe_send_and_expire(secure_client, monkeypatch):
     assert client.post("/api/push/subscribe", json={**SUB, "endpoint": APPLE + "gone"}, headers=CSRF).status_code == 201
     r = client.post("/api/push/test", headers=CSRF).json()
     assert r == {"sent": 1, "removed": 1, "failed": 0}
-    assert sent[0][1] == {"title": "Agent Hub", "body": "Notifications work on this device.", "url": "/", "kind": "test"}
+    assert sent[0][1] == {"title": "Kiln", "body": "Notifications work on this device.", "url": "/", "kind": "test"}
     assert [d["label"] for d in client.get("/api/push").json()["devices"]] == ["iPhone"]
     assert client.post("/api/push/unsubscribe", json={"endpoint": APPLE}, headers=CSRF).json() == {"removed": True}
     assert client.get("/api/push").json()["devices"] == []

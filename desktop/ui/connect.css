@@ -12,7 +12,7 @@ form {
   border: 1px solid rgb(255 255 255 / 0.06); border-radius: 12px; box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 }
 .brand { display: flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 600; }
-.mark { width: 24px; height: 24px; border-radius: 6px; background: radial-gradient(120% 120% at 30% 20%, #ff9a62, #e64800 70%); }
+.mark { width: 26px; height: 26px; background: url("kiln-mark.png") center / contain no-repeat; }
 p { margin: 0; color: #8291a8; }
 code { font: 12px Consolas, monospace; color: #a9b4c6; }
 label { font-size: 12px; font-weight: 500; color: #a9b4c6; }

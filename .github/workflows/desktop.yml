@@ -53,10 +53,10 @@ jobs:
         with:
           projectPath: desktop
           tagName: desktop-v__VERSION__
-          releaseName: Agent Hub for Windows v__VERSION__
+          releaseName: Kiln for Windows v__VERSION__
           releaseBody: |
-            Windows installers for the Agent Hub desktop app. They aren't code-signed, so
+            Windows installers for the Kiln desktop app. They aren't code-signed, so
             Windows SmartScreen will ask you to confirm the first time ("More info" → "Run anyway").
-            On first launch, enter your Agent Hub address (https://<server>.<tailnet>.ts.net).
+            On first launch, enter your Kiln address (https://<server>.<tailnet>.ts.net).
           releaseDraft: true
           prerelease: false

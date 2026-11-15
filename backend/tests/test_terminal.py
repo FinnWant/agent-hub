@@ -142,11 +142,11 @@ def test_security_headers_and_ui_fallback(client, settings, monkeypatch, tmp_pat
 
     from app import config
     (tmp_path / "assets").mkdir()
-    (tmp_path / "index.html").write_text("<!doctype html><title>Agent Hub</title>")
+    (tmp_path / "index.html").write_text("<!doctype html><title>Kiln</title>")
     (tmp_path / "assets" / "app.js").write_text("console.log(1)")
     monkeypatch.setattr(config, "settings", dataclasses.replace(settings, frontend_dir=tmp_path))
     r = client.get("/sandboxes/abc")  # client-side route -> index.html
-    assert r.status_code == 200 and "Agent Hub" in r.text
+    assert r.status_code == 200 and "Kiln" in r.text
     assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
     assert r.headers["x-frame-options"] == "DENY"
     assert "immutable" in client.get("/assets/app.js").headers["cache-control"]

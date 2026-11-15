@@ -167,7 +167,7 @@ def allowed_origins(conn: Request | WebSocket) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def on_preview_host(conn: Request | WebSocket) -> bool:
-    """True when the request came in on the hostname reserved for previews. Agent Hub never
+    """True when the request came in on the hostname reserved for previews. Kiln never
     issues or accepts a session there, so preview servers never see one."""
     host = (conn.headers.get("host") or "").rsplit(":", 1)[0].strip("[]").lower().rstrip(".")
     preview = config.settings.preview_host.lower().rstrip(".")
@@ -176,7 +176,7 @@ def on_preview_host(conn: Request | WebSocket) -> bool:
 
 def require_not_preview_host(request: Request) -> None:
     if on_preview_host(request):
-        raise HTTPException(403, "This hostname is reserved for previews. Open Agent Hub by its IP address instead.")
+        raise HTTPException(403, "This hostname is reserved for previews. Open Kiln by its IP address instead.")
 
 
 def require_configured() -> None:

@@ -3,7 +3,7 @@
 Each sandbox gets a host port from PREVIEW_PORT_RANGE at creation, mapped to its template's
 preview port (8000 python, 5173 node, 3000 static). A server must listen on 0.0.0.0 inside
 the container to be reachable. Links use PREVIEW_HOST (the MagicDNS name), never the
-hostname Agent Hub itself is opened on, so preview pages never receive the session cookie.
+hostname Kiln itself is opened on, so preview pages never receive the session cookie.
 """
 
 from __future__ import annotations

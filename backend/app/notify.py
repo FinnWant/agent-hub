@@ -1,9 +1,9 @@
 """Notifications: one event, two ways out.
 
-* `/api/events` (WebSocket): every open Agent Hub window, including the Windows app, which
+* `/api/events` (WebSocket): every open Kiln window, including the Windows app, which
   turns events into native notifications.
 * Web Push: devices that subscribed (the iPhone home-screen app, desktop browsers), even when
-  Agent Hub isn't open. Needs HTTPS (PUBLIC_URL). Payloads are encrypted end to end by the
+  Kiln isn't open. Needs HTTPS (PUBLIC_URL). Payloads are encrypted end to end by the
   Web Push protocol; the VAPID signing key is generated on first use and kept in the data dir.
 
 Events: run finished, run failed/timed out, sandbox stopped unexpectedly or errored.
@@ -100,7 +100,7 @@ class Notifier:
 
     def sandbox_problem(self, sb: Sandbox, error: str) -> None:
         self.publish({"kind": "sandbox.problem", "title": f"{sb.name}: {error.splitlines()[0][:80]}",
-                      "body": "Open Agent Hub to start it again or look at what happened.",
+                      "body": "Open Kiln to start it again or look at what happened.",
                       "sandbox": sb.id, "url": f"/sandboxes/{sb.id}"})
 
     # ---- fan-out ---------------------------------------------------------------

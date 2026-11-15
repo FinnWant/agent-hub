@@ -1,4 +1,4 @@
-// Thin client for the Agent Hub API. Same origin only; the session is an HttpOnly cookie.
+// Thin client for the Kiln API. Same origin only; the session is an HttpOnly cookie.
 // Mutating requests carry the CSRF header the backend requires.
 
 export type SandboxState = "creating" | "running" | "stopped" | "error" | "destroyed";

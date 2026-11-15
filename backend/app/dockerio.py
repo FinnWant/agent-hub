@@ -24,7 +24,7 @@ STDOUT, STDERR = 1, 2
 def unix_socket_path(docker_host: str) -> str:
     u = urlsplit(docker_host or "unix:///var/run/docker.sock")
     if u.scheme != "unix":
-        raise ValueError("Agent Hub needs a unix:// DOCKER_HOST")
+        raise ValueError("Kiln needs a unix:// DOCKER_HOST")
     return u.path
 
 

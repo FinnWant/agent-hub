@@ -1,5 +1,5 @@
 """Agent runners: how an agent is started in a sandbox, how its output becomes events, and how
-it is stopped. The rest of Agent Hub only sees the `AgentRunner` / `RunProcess` interfaces.
+it is stopped. The rest of Kiln only sees the `AgentRunner` / `RunProcess` interfaces.
 
 Events are plain dicts sent to the browser and stored per run:
     {"type": "log", "kind": "text|tool|tool_result|system|stderr|stdout|result|error", "text": ...}
@@ -69,7 +69,7 @@ def pidfile(run_id: str) -> str:
 
 def launch_argv(run_id: str, timeout: int, argv: list[str]) -> list[str]:
     """Run `argv` in its own session (so cancel can kill everything it started), record the
-    session id, and keep coreutils `timeout` as a backstop behind Agent Hub's own timer."""
+    session id, and keep coreutils `timeout` as a backstop behind Kiln's own timer."""
     script = f'echo $$ > {pidfile(run_id)}; exec timeout -k 10 {timeout + 60} "$@"'
     return ["setsid", "-w", "bash", "-c", script, "ah-run", *argv]
 
@@ -149,9 +149,9 @@ class ScriptRunner(ExecRunner):
 
 
 SYSTEM_PROMPT = (
-    "You are running unattended in a disposable, network-restricted sandbox managed by Agent Hub. "
+    "You are running unattended in a disposable, network-restricted sandbox managed by Kiln. "
     "Work in /workspace, a git repository already checked out on branch {branch}. Stay on this branch; "
-    "don't push and don't rewrite history: Agent Hub commits whatever you leave in the working tree "
+    "don't push and don't rewrite history: Kiln commits whatever you leave in the working tree "
     "and the owner reviews the diff. Nobody can answer questions during the run, so make reasonable "
     "decisions, keep changes focused on the request, and finish with a short summary of what you did. "
     "If you start a web server for the owner to preview, it must listen on 0.0.0.0 port {preview_port} "
@@ -186,7 +186,7 @@ class ClaudeCodeRunner(ExecRunner):
     def problem(self) -> str | None:
         if not config.settings.claude_code_oauth_token:
             return ("No Claude token is configured. On the server run "
-                    "`python -m app.set_secret claude` and restart Agent Hub.")
+                    "`python -m app.set_secret claude` and restart Kiln.")
         return None
 
     def argv(self, spec: RunSpec) -> list[str]:
