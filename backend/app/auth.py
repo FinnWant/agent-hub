@@ -134,8 +134,32 @@ class RateLimiter:
 login_limiter = RateLimiter()
 
 
+LOOPBACK = {"127.0.0.1", "::1"}
+
+
 def client_ip(conn: Request | WebSocket) -> str:
-    return conn.client.host if conn.client else "unknown"
+    """Who is calling, for the audit log and the login rate limit. Behind `tailscale serve`
+    the peer is always 127.0.0.1, so use the forwarded address and Tailscale login instead
+    (only when the request really came from the local proxy)."""
+    peer = conn.client.host if conn.client else "unknown"
+    if not (config.settings.trust_proxy and peer in LOOPBACK):
+        return peer
+    forwarded = (conn.headers.get("x-forwarded-for") or "").split(",")[-1].strip()
+    login = (conn.headers.get("tailscale-user-login") or "").strip()[:100]
+    who = forwarded or peer
+    return f"{who} ({login})" if login else who
+
+
+def allowed_origins(conn: Request | WebSocket) -> set[str]:
+    """Origins a browser may legitimately send: the public URL, and the Host it connected to."""
+    out = set()
+    if config.settings.public_url:
+        u = urlsplit(config.settings.public_url)
+        out.add(f"{u.scheme}://{u.netloc}")
+    host = conn.headers.get("host")
+    if host:
+        out |= {f"http://{host}", f"https://{host}"}
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +202,6 @@ def require_admin(request: Request) -> None:
 def ws_allowed(ws: WebSocket) -> bool:
     """Cookie plus a same-origin check: WebSockets ignore SameSite on some browsers and have no CORS."""
     origin = ws.headers.get("origin")
-    if not origin or urlsplit(origin).netloc != ws.headers.get("host") or on_preview_host(ws):
+    if not origin or origin not in allowed_origins(ws) or on_preview_host(ws):
         return False
     return token_valid(ws.cookies.get(COOKIE))

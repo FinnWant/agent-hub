@@ -37,3 +37,4 @@ desktop/src-tauri/target/
 .vscode/
 .idea/
 .DS_Store
+desktop/src-tauri/gen/

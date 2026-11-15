@@ -103,6 +103,22 @@ export interface PruneResult {
   bytes: number;
 }
 
+export interface PushInfo {
+  available: boolean;
+  public_key: string | null;
+  devices: { label: string | null; endpoint_host: string; created_at: number; last_ok_at: number | null; endpoint: string }[];
+}
+
+export interface HubEvent {
+  kind: "run.finished" | "run.failed" | "sandbox.problem" | "test";
+  title: string;
+  body: string;
+  url?: string;
+  sandbox?: string;
+  run?: string;
+  ts: number;
+}
+
 export interface Template {
   name: string;
   description: string;
@@ -247,12 +263,21 @@ export const api = {
   stopStatic: (id: string) => request<PreviewStatus>("DELETE", `/sandboxes/${encodeURIComponent(id)}/preview/static`),
   measure: (id: string) => request<{ workspace_bytes: number | null }>("POST", `/sandboxes/${encodeURIComponent(id)}/measure`),
   prune: () => request<PruneResult>("POST", "/system/prune"),
+  push: () => request<PushInfo>("GET", "/push"),
+  pushSubscribe: (body: { endpoint: string; keys: Record<string, string>; label: string }) =>
+    request<{ ok: boolean }>("POST", "/push/subscribe", body),
+  pushUnsubscribe: (endpoint: string) => request<{ removed: boolean }>("POST", "/push/unsubscribe", { endpoint }),
+  pushTest: () => request<{ sent: number; removed: number; failed: number }>("POST", "/push/test"),
   audit: (beforeId?: number, limit = 100) =>
     request<AuditEntry[]>("GET", `/audit?limit=${limit}${beforeId ? `&before_id=${beforeId}` : ""}`),
 };
 
 function wsBase(): string {
   return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api`;
+}
+
+export function hubEventsUrl(): string {
+  return `${wsBase()}/events`;
 }
 
 export function runEventsUrl(id: string): string {

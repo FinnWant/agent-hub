@@ -7,8 +7,8 @@ Each sandbox is a locked-down container with its own workspace volume. An agent 
 in non-interactive mode, behind a pluggable runner) works on a branch inside it; you watch the
 stream live, review the diff, and approve. Nothing is exposed to the public internet.
 
-> **Status:** Phase 4 — review an agent's work as a diff, browse its files, and open a dev
-> server running in a sandbox from any device on your tailnet. Desktop app comes in phase 5.
+> **Status:** Phase 5: a Windows app with native notifications, an installable iPhone app with
+> push notifications, and HTTPS through `tailscale serve`.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ Browser / desktop app ── Tailscale ──► Agent Hub :8090  (FastAPI, syst
 |---|---|
 | `backend/` | FastAPI app and tests |
 | `frontend/` | React + TypeScript + Vite UI (design system: *Kiln*) |
-| `desktop/` | Tauri 2 wrapper around the frontend |
+| `desktop/` | Tauri 2 Windows app (built by `.github/workflows/desktop.yml`) |
 | `images/` | Dockerfiles for sandbox templates (`python`, `node`, `static`) |
 | `deploy/` | Install script, systemd units, egress firewall rules, `env.example` |
 
@@ -55,9 +55,32 @@ bash deploy/smoke-test.sh                         # API + terminal acceptance ch
 bash deploy/integration-test.sh                   # Docker integration tests, as agenthub
 ```
 
-Add the ports (`tcp:8090` and, for previews, `tcp:8200-8299`) to your Tailscale ACL so your
-devices can reach them, then open `http://<tailscale-ip>:8090` in a browser on your tailnet.
-Use the IP, not the MagicDNS name: that name is reserved for previews (see below).
+In the Tailscale admin console, enable **HTTPS Certificates** (DNS page) before installing, and
+allow `tcp:443` and, for previews, `tcp:8200-8299` in your ACL. The installer then serves Agent
+Hub at `https://<server>.<tailnet>.ts.net` through `tailscale serve` (Agent Hub itself listens on
+127.0.0.1 only). Certificates are public records, so the machine and tailnet names appear in
+Certificate Transparency logs; nothing becomes reachable from outside your tailnet. Without
+HTTPS (`HTTPS=off` in `.env`) Agent Hub stays on `http://<tailscale-ip>:8090` (`tcp:8090`) and
+everything works except push notifications.
+
+## Apps and notifications
+
+You're notified when a run finishes, fails or times out, and when a sandbox stops on its own
+(for example, killed for using too much memory).
+
+- **Windows:** the desktop app (`desktop/`, Tauri 2) shows Agent Hub in its own window with
+  native notifications. Closing the window keeps it in the tray. Build it from the
+  *Actions → Desktop app (Windows) → Run workflow* button; the installers land in a draft
+  release. They aren't code-signed, so SmartScreen asks once. On first launch, enter your
+  Agent Hub address. The app gives your server's pages only two native abilities: notifications
+  and opening links in your browser.
+- **iPhone (iOS 16.4 or later):** open the https address in Safari, tap **Share → Add to Home
+  Screen**, open Agent Hub from the Home Screen, log in, then tap the bell and **Turn on**.
+  Notifications arrive through Apple's push service even when the app is closed.
+- **Desktop browsers** on the https address can turn on push the same way (bell icon).
+
+Push messages are end-to-end encrypted (Web Push) and signed with a key generated on the server
+(`data/vapid.pem`). They contain only the notification text, never logs or secrets.
 
 ### Agent credentials
 
@@ -143,6 +166,8 @@ curl -b jar $API/audit
 | `GET /api/runs/{id}/diff` | The run's branch vs its base: per-file counts and the patch |
 | `GET /api/sandboxes/{id}/preview` · `POST`/`DELETE …/preview/static` | Preview status; static file server |
 | `POST /api/sandboxes/{id}/measure` · `POST /api/system/prune` | Measure workspace now; clean up disk |
+| `WS /api/events` | Notification events for open windows and the Windows app |
+| `GET /api/push` · `POST /api/push/subscribe` · `unsubscribe` · `test` | Web Push: key, devices, test |
 | `GET /api/audit` | Audit log, newest first |
 
 ## Development
@@ -197,10 +222,11 @@ to its template's port (8000 python, 5173 node, 3000 static). It is published on
 **Tailscale IP only** (`PREVIEW_BIND`), never `0.0.0.0`, and ufw allows the range only on
 `tailscale0`. A dev server must listen on `0.0.0.0` inside the sandbox.
 
-Preview links use the server's MagicDNS name (`PREVIEW_HOST`), and Agent Hub refuses logins
-and API calls on that name. Browsers send a host's cookies to *every* port on it, so if you
-opened Agent Hub and a preview on the same hostname, code the agent wrote could read your
-session cookie. With different hostnames it never gets one.
+Preview links use a different hostname from Agent Hub (`PREVIEW_HOST`): the Tailscale IP when
+Agent Hub is on HTTPS at its MagicDNS name, or the MagicDNS name when Agent Hub is on the IP.
+Agent Hub refuses logins and API calls on the preview hostname. Browsers send a host's cookies
+to *every* port on it, so if you opened Agent Hub and a preview on the same hostname, code the
+agent wrote could read your session cookie. With different hostnames it never gets one.
 
 ## Security model
 
@@ -266,8 +292,8 @@ action including terminal open/close.
 1. Sandbox API — templates, lifecycle, limits, egress rules, auth, audit log, systemd ✓
 2. Live terminal and minimal web UI ✓
 3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction ✓
-4. Files, diff review, previews, resource display, disk checks and clean-up, phone layout *(current)*
-5. Tauri desktop app with native notifications
+4. Files, diff review, previews, resource display, disk checks and clean-up, phone layout ✓
+5. Windows app, iPhone home-screen app, notifications, HTTPS *(current)*
 
 **Later:** gVisor, egress domain allowlist, opening pull requests, multiple runners, run
 templates, scheduled runs.

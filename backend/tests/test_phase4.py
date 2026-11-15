@@ -185,6 +185,12 @@ def test_preview_ports_are_allocated_and_published_on_tailscale_ip_only(admin, b
     assert d["preview_port"] == 8200  # freed by destroy
 
 
+def test_preview_ports_skip_ports_other_containers_hold(admin, backend, previews):
+    backend.foreign_ports.add(8200)  # e.g. a real sandbox while the integration tests run
+    a = admin.post("/api/sandboxes", json={"name": "a", "template": "python", "memory": "512m"}, headers=CSRF).json()
+    assert a["preview_port"] == 8201
+
+
 def test_no_previews_without_bind_and_host(admin, backend):
     sb = admin.post("/api/sandboxes", json={"name": "a", "template": "python"}, headers=CSRF).json()
     assert sb["preview_port"] is None and "ports" not in backend.created_specs[0]

@@ -43,6 +43,7 @@ class RunManager:
         self._cancel_reason: dict[str, str] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._dropped: set[str] = set()
+        self.on_finished = None  # callable(run, sandbox_name), e.g. Notifier.run_finished
 
     # ---- queries -------------------------------------------------------------
 
@@ -249,6 +250,11 @@ class RunManager:
                            num_turns=outcome.num_turns if outcome else None)
         self.emit(run, {"type": "done", "state": state, "error": error, "commit": commit,
                         "branch": run.branch, "pushed": pushed})
+        if self.on_finished:
+            try:
+                self.on_finished(run, sb.name)
+            except Exception:  # noqa: BLE001
+                log.exception("run notification failed")
         self.db.audit("system", "run.finish", run.sandbox_id, ok=state == "succeeded",
                       detail={"run": run.id, "state": state, "commit": commit, "pushed": pushed,
                               "cost_usd": run.cost_usd})

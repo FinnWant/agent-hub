@@ -6,12 +6,23 @@ import Login from "./pages/Login";
 import Home from "./pages/Home";
 import SandboxDetail from "./pages/SandboxDetail";
 import Audit from "./pages/Audit";
+import NotificationsDialog, { useHubEvents } from "./components/Notifications";
+import { installExternalLinkHandler, registerServiceWorker } from "./lib/notifications";
+
+registerServiceWorker();
+installExternalLinkHandler();
+
+function HubEvents() {
+  useHubEvents();
+  return null;
+}
 
 type AuthState = "checking" | "in" | "out" | "unconfigured";
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState>("checking");
   const [health, setHealth] = useState<Health | null>(null);
+  const [notifOpen, setNotifOpen] = useState(false);
   const path = usePath();
   useLinkInterception();
 
@@ -62,6 +73,10 @@ export default function App() {
                 <span className="mono">v{health.version}</span>
               </div>
             )}
+            <button className="btn btn-ghost btn-sm" onClick={() => setNotifOpen(true)} style={{ justifyContent: "flex-start" }}
+              aria-label="Notifications">
+              <Icon name="bell" /> <span className="hide-sm">Notifications</span>
+            </button>
             <button className="btn btn-ghost btn-sm" onClick={logout} style={{ justifyContent: "flex-start" }}>
               <Icon name="logout" /> Log out
             </button>
@@ -81,6 +96,8 @@ export default function App() {
           )}
         </main>
       </div>
+      <HubEvents />
+      {notifOpen && <NotificationsDialog onClose={() => setNotifOpen(false)} />}
     </ToastProvider>
   );
 }

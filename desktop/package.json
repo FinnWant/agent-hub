@@ -1,0 +1,13 @@
+{
+  "name": "agent-hub-desktop",
+  "private": true,
+  "version": "0.5.0",
+  "scripts": {
+    "tauri": "tauri",
+    "build": "tauri build",
+    "icons": "tauri icon app-icon.svg --output src-tauri/icons"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

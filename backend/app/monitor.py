@@ -47,6 +47,7 @@ class Monitor:
         return size
 
     def tick(self) -> None:
+        self.svc.list()  # reconciles states: notices sandboxes that died on their own
         self.measure_memory()
         interval = config.settings.workspace_size_interval
         for sb in self.svc.running():

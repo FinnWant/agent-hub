@@ -19,7 +19,7 @@ from websockets.sync.client import connect
 base, sid = sys.argv[1], sys.argv[2]
 cookie = os.environ["AH_SESSION"]
 u = urlsplit(base)
-ws_url = f"ws://{u.netloc}/api/sandboxes/{sid}/terminal?cols=100&rows=30"
+ws_url = f"{'wss' if u.scheme == 'https' else 'ws'}://{u.netloc}/api/sandboxes/{sid}/terminal?cols=100&rows=30"
 origin = f"{u.scheme}://{u.netloc}"
 failed = 0
 

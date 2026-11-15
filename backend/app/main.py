@@ -8,6 +8,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket
@@ -21,6 +22,7 @@ from .db import Database, Sandbox
 from . import demo, files as files_mod, preview as preview_mod
 from .db import Run
 from .monitor import Monitor
+from .notify import Notifier, push_endpoint_ok
 from .docker_backend import Backend, BackendError, DockerBackend, FakeBackend, NotManaged
 from .runners import default_runners
 from .runs import RunManager
@@ -50,6 +52,12 @@ async def lifespan(app: FastAPI):
     svc: SandboxService = app.state.service
     if not hasattr(app.state, "runs"):
         app.state.runs = build_runs(svc)
+    if not hasattr(app.state, "notifier"):
+        app.state.notifier = Notifier(svc.db)
+    notifier: Notifier = app.state.notifier
+    notifier.bind_loop(asyncio.get_running_loop())
+    svc.on_problem = notifier.sandbox_problem
+    app.state.runs.on_finished = notifier.run_finished
     svc.reconcile_on_startup()
     app.state.runs.reconcile_on_startup()
     try:
@@ -82,9 +90,11 @@ app = FastAPI(title="Agent Hub", version=__version__, lifespan=lifespan,
 Admin = Annotated[None, Depends(auth.require_admin)]
 
 # xterm.js and React set inline styles; everything else is same-origin only.
+# ipc: / http://ipc.localhost let the Windows app's bridge (Tauri) talk to its shell; browsers
+# never use them. worker-src for the service worker that shows push notifications.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-       "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
-       "object-src 'none'")
+       "font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self'; "
+       "manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
 
 
 @app.middleware("http")
@@ -97,6 +107,8 @@ async def security_headers(request: Request, call_next):
     h.setdefault("Referrer-Policy", "no-referrer")
     if request.url.path.startswith("/api/"):
         h.setdefault("Cache-Control", "no-store")
+    if config.settings.https:
+        h.setdefault("Strict-Transport-Security", "max-age=31536000")
     return response
 
 
@@ -160,7 +172,8 @@ def login(body: LoginBody, request: Request, response: Response, svc: Svc) -> di
         raise HTTPException(401, "Wrong password")
     auth.login_limiter.reset(ip)
     token, max_age = auth.make_token()
-    response.set_cookie(auth.COOKIE, token, max_age=max_age, httponly=True, samesite="strict", path="/")
+    response.set_cookie(auth.COOKIE, token, max_age=max_age, httponly=True, samesite="strict", path="/",
+                        secure=config.settings.https)
     svc.db.audit(ip, "auth.login")
     return {"ok": True}
 
@@ -401,6 +414,92 @@ def prune(_: Admin, request: Request, svc: Svc) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Notifications: live event stream and Web Push
+# ---------------------------------------------------------------------------
+
+def notifier_of(request: Request) -> Notifier:
+    return request.app.state.notifier
+
+
+Notif = Annotated[Notifier, Depends(notifier_of)]
+
+
+@app.websocket("/api/events")
+async def events(ws: WebSocket) -> None:
+    """Notification events for every open window: {"events": [...]}; keep-alive every 25 s."""
+    notifier: Notifier = ws.app.state.notifier
+    if not auth.configured() or not auth.ws_allowed(ws):
+        await ws.close(code=4401)
+        return
+    queue = notifier.subscribe()
+    try:
+        await ws.accept()
+        while True:
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=25)
+                await ws.send_json({"events": [ev]})
+            except TimeoutError:
+                await ws.send_json({"events": []})
+    except Exception:  # noqa: BLE001  (client went away)
+        pass
+    finally:
+        notifier.unsubscribe(queue)
+
+
+@app.get("/api/push")
+def push_info(_: Admin, notifier: Notif) -> dict:
+    """Whether Web Push is available here, the key browsers subscribe with, and the devices."""
+    s = config.settings
+    devices = [{"label": d["label"], "endpoint_host": urlsplit(d["endpoint"]).hostname,
+                "created_at": d["created_at"], "last_ok_at": d["last_ok_at"], "endpoint": d["endpoint"]}
+               for d in notifier.db.list_push_subscriptions()]
+    return {"available": s.https, "public_key": notifier.vapid.public_key if s.https else None,
+            "devices": devices}
+
+
+class PushSubscription(BaseModel):
+    endpoint: str = Field(max_length=1000)
+    keys: dict[str, str]
+    label: str | None = Field(default=None, max_length=60)
+
+
+@app.post("/api/push/subscribe", status_code=201)
+def push_subscribe(body: PushSubscription, _: Admin, request: Request, notifier: Notif) -> dict:
+    if not config.settings.https:
+        raise HTTPException(400, "Push notifications need Agent Hub on HTTPS (PUBLIC_URL)")
+    if not push_endpoint_ok(body.endpoint):
+        raise HTTPException(400, "Not a recognised push service")
+    p256dh, key = body.keys.get("p256dh", ""), body.keys.get("auth", "")
+    if not (20 <= len(p256dh) <= 200 and 8 <= len(key) <= 100):
+        raise HTTPException(400, "Invalid subscription keys")
+    notifier.db.save_push_subscription(body.endpoint, p256dh, key, body.label)
+    notifier.db.audit(auth.client_ip(request), "push.subscribe", detail={"label": body.label,
+                                                                         "service": urlsplit(body.endpoint).hostname})
+    return {"ok": True}
+
+
+class PushUnsubscribe(BaseModel):
+    endpoint: str = Field(max_length=1000)
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(body: PushUnsubscribe, _: Admin, request: Request, notifier: Notif) -> dict:
+    removed = notifier.db.delete_push_subscription(body.endpoint)
+    if removed:
+        notifier.db.audit(auth.client_ip(request), "push.unsubscribe")
+    return {"removed": removed}
+
+
+@app.post("/api/push/test")
+async def push_test(_: Admin, notifier: Notif) -> dict:
+    ev = {"kind": "test", "title": "Agent Hub", "body": "Notifications work on this device.", "url": "/"}
+    notifier.publish(ev, push=False)  # open windows and the Windows app; push is sent below
+    if not config.settings.https:
+        return {"sent": 0, "removed": 0, "failed": 0}
+    return await asyncio.to_thread(notifier.push_all, ev)
+
+
+# ---------------------------------------------------------------------------
 # Agent runs
 # ---------------------------------------------------------------------------
 
@@ -617,7 +716,8 @@ def web_ui(path: str) -> Response:
         f = (root / path).resolve()
         if f.is_relative_to(root) and f.is_file():
             immutable = f.is_relative_to(root / "assets")
-            return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable"
+            media = {".webmanifest": "application/manifest+json", ".js": "text/javascript"}.get(f.suffix)
+            return FileResponse(f, media_type=media, headers={"Cache-Control": "public, max-age=31536000, immutable"
                                             if immutable else "no-cache"})
     index = root / "index.html"
     if not index.is_file():

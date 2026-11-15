@@ -103,7 +103,9 @@ class Backend(Protocol):
     async def exec_stream(self, container_id: str, argv: list[str], env: dict[str, str]) -> Any: ...
     def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None: ...
     def memory_usage(self, container_id: str) -> int | None: ...
+    def exit_info(self, container_id: str) -> dict[str, Any]: ...
     def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]: ...
+    def published_ports(self) -> set[int]: ...
     def get_file(self, container_id: str, path: str, max_size: int) -> bytes: ...
     async def open_terminal(self, container_id: str, cols: int, rows: int) -> TerminalSession: ...
 
@@ -229,6 +231,13 @@ class DockerBackend:
         except ValueError as e:
             raise BackendError(str(e)) from e
 
+    def exit_info(self, container_id: str) -> dict[str, Any]:
+        c = self._managed(container_id)
+        if c is None:
+            return {}
+        st = c.attrs.get("State") or {}
+        return {"exit_code": st.get("ExitCode"), "oom": bool(st.get("OOMKilled"))}
+
     def memory_usage(self, container_id: str) -> int | None:
         """Memory in use, as `docker stats` counts it (minus reclaimable page cache)."""
         c = self._managed(container_id)
@@ -240,6 +249,17 @@ class DockerBackend:
             return None
         inactive = (st.get("stats") or {}).get("inactive_file", 0)
         return max(0, usage - inactive)
+
+    def published_ports(self) -> set[int]:
+        """Host ports any container on this Docker daemon publishes (running or not), so a new
+        sandbox never asks for one that is taken, e.g. by a sandbox from another database."""
+        ports: set[int] = set()
+        for c in self.client.containers.list(all=True):
+            for binds in (c.attrs.get("HostConfig", {}).get("PortBindings") or {}).values():
+                for b in binds or []:
+                    if str(b.get("HostPort", "")).isdigit():
+                        ports.add(int(b["HostPort"]))
+        return ports
 
     def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]:
         """Reclaim disk without touching anything a live sandbox uses or anything Agent Hub
@@ -303,6 +323,7 @@ class FakeBackend:
         self.stream_calls: list[tuple[list[str], dict[str, str]]] = []
         self.stream_script: list[tuple[float, int, bytes]] = []  # (delay, stream, data)
         self.stream_exit_code = 0
+        self.foreign_ports: set[int] = set()  # host ports held by containers outside this database
 
     def ping(self) -> bool:
         return True
@@ -312,6 +333,9 @@ class FakeBackend:
 
     def image_exists(self, image: str) -> bool:
         return config.settings.demo_mode or image in self.images
+
+    def published_ports(self) -> set[int]:
+        return set(self.foreign_ports)
 
     def add_foreign_container(self, container_id: str) -> None:
         """Simulate a container Agent Hub didn't create (e.g. something else on the host)."""
@@ -374,6 +398,10 @@ class FakeBackend:
         self._running(container_id)
         self.stream_calls.append((argv, env))
         return FakeExecStream(list(self.stream_script), self.stream_exit_code)
+
+    def exit_info(self, container_id: str) -> dict[str, Any]:
+        c = self._managed(container_id)
+        return {"exit_code": (c or {}).get("exit_code", 137), "oom": (c or {}).get("oom", False)}
 
     def memory_usage(self, container_id: str) -> int | None:
         c = self._managed(container_id)

@@ -61,6 +61,13 @@ class Settings:
     # Network. Each host is bound with IP_FREEBIND, so the Tailscale IP may come up after us.
     bind_hosts: list[str] = field(default_factory=lambda: _list("BIND_HOSTS", "127.0.0.1"))
     port: int = _int("PORT", 8090)
+    # The address you open Agent Hub at, when it sits behind HTTPS (`tailscale serve`), e.g.
+    # https://myserver.tailnet.ts.net. Enables Secure cookies, the installable app and Web Push.
+    public_url: str = os.getenv("PUBLIC_URL", "").rstrip("/")
+    # Behind `tailscale serve` (requests arrive from 127.0.0.1): take the client's address from
+    # X-Forwarded-For and its Tailscale login from Tailscale-User-Login (Serve strips forged ones).
+    trust_proxy: bool = _bool("TRUST_PROXY", False)
+
     preview_port_range: str = os.getenv("PREVIEW_PORT_RANGE", "8200-8299")
     # Previews are published on this address only (the Tailscale IP; never 0.0.0.0) ...
     preview_bind: str = os.getenv("PREVIEW_BIND", "")
@@ -135,6 +142,10 @@ class Settings:
     db_path: Path = Path(os.getenv("DB_PATH", "data/agent-hub.db")).expanduser()
     demo_mode: bool = _bool("DEMO_MODE", False)
 
+
+    @property
+    def https(self) -> bool:
+        return self.public_url.startswith("https://")
 
     @property
     def preview_ports(self) -> range:

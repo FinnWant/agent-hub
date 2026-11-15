@@ -5,7 +5,12 @@
 # Prompts for the admin password and (once) for sudo, to show `docker inspect` as agenthub.
 set -uo pipefail
 
-BASE=${1:-http://$(tailscale ip -4 | head -1):8090}
+TS_NAME=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
+if [[ -z ${1:-} && -n $TS_NAME ]] && curl -sf --max-time 5 -o /dev/null "https://$TS_NAME/api/health"; then
+  BASE=https://$TS_NAME          # behind tailscale serve
+else
+  BASE=${1:-http://$(tailscale ip -4 | head -1):8090}
+fi
 CSRF=(-H "X-Requested-With: agent-hub")
 JAR=$(mktemp); trap 'rm -f "$JAR"' EXIT
 PASS=0; FAIL=0
@@ -106,9 +111,16 @@ else
     if curl -s --max-time 2 -o /dev/null "http://$other:$PPORT/"; then bad "preview also answers on $other:$PPORT"; else ok "preview not exposed on $other"; fi
   done
   PHOST=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "$PURL")
-  c=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PHOST:8090" "${CSRF[@]}" -H 'Content-Type: application/json' \
-       -X POST "$BASE/api/auth/login" -d '{"password":"x"}')
-  [[ $c == 403 ]] && ok "no logins on the preview hostname" || bad "login on preview hostname returned $c"
+  if [[ $BASE == https://* ]]; then
+    # Agent Hub listens on localhost only; the preview host (the IP) must not serve it at all.
+    if curl -s --max-time 3 -o /dev/null "http://$PHOST:8090/api/health"; then bad "Agent Hub answers on the preview host $PHOST:8090"
+    else ok "Agent Hub not reachable on the preview host ($PHOST)"; fi
+    [[ $(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health") == 200 ]] && ok "HTTPS via tailscale serve" || bad "HTTPS health"
+  else
+    c=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PHOST:8090" "${CSRF[@]}" -H 'Content-Type: application/json' \
+         -X POST "$BASE/api/auth/login" -d '{"password":"x"}')
+    [[ $c == 403 ]] && ok "no logins on the preview hostname" || bad "login on preview hostname returned $c"
+  fi
   api "${CSRF[@]}" -X DELETE "$BASE/api/sandboxes/$SID/preview/static" >/dev/null
 fi
 

@@ -102,16 +102,53 @@ for dir in "$APP_DIR"/images/*/; do  # python, node, static
   as_agent docker build -q -t "agent-hub/$name:$VERSION" "$dir" >/dev/null
 done
 
+PORT=$(env_get PORT); PORT=${PORT:-8090}
+TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
+TS_NAME=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
+
+# HTTPS through `tailscale serve` (set HTTPS=off in .env to skip): Tailscale terminates TLS with
+# a real certificate for the MagicDNS name and forwards to Agent Hub on 127.0.0.1. Agent Hub
+# then listens on localhost only, and previews move to the plain Tailscale IP (a different
+# host, so they never get the session cookie).
+HTTPS_OK=0
+if [[ $(env_get HTTPS) != off && -n $TS_NAME && -n $TS_IP ]]; then
+  echo "==> Serving Agent Hub over HTTPS at https://$TS_NAME (tailscale serve)"
+  if out=$(timeout 60 tailscale serve --bg --https=443 "http://127.0.0.1:$PORT" 2>&1); then
+    HTTPS_OK=1
+  else
+    echo "    tailscale serve didn't succeed, so Agent Hub stays on plain HTTP for now:"
+    echo "$out" | sed 's/^/      /' | head -8
+    echo "    Enable HTTPS Certificates on the DNS page of the Tailscale admin console, then re-run this script."
+  fi
+fi
+if [[ $HTTPS_OK -eq 1 ]]; then
+  env_set PUBLIC_URL "https://$TS_NAME"
+  env_set TRUST_PROXY true
+  env_set BIND_HOSTS 127.0.0.1
+  env_set PREVIEW_BIND "$TS_IP"
+  env_set PREVIEW_HOST "$TS_IP"
+elif [[ -n $(env_get PUBLIC_URL) ]]; then
+  echo "    Note: PUBLIC_URL is still set from an earlier HTTPS setup."
+fi
+chown "$SERVICE_USER:$SERVICE_USER" "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
 echo "==> Installing the agent-hub service"
 sed "s/AGENT_UID/$AGENT_UID/g" "$APP_DIR/deploy/agent-hub.service" > /etc/systemd/system/agent-hub.service
 systemctl daemon-reload
 systemctl enable -q agent-hub.service
 systemctl restart agent-hub.service
 
-PORT=$(env_get PORT); PORT=${PORT:-8090}
 if ufw status 2>/dev/null | grep -q "Status: active"; then
-  echo "==> Allowing port $PORT on tailscale0 (ufw)"
-  ufw allow in on tailscale0 to any port "$PORT" proto tcp comment 'agent-hub' >/dev/null
+  if [[ $HTTPS_OK -eq 1 ]]; then
+    # Agent Hub is only on localhost now; HTTPS arrives on 443 via Tailscale.
+    ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 || true
+    echo "==> Allowing HTTPS (443) on tailscale0 (ufw)"
+    ufw allow in on tailscale0 to any port 443 proto tcp comment 'agent-hub https' >/dev/null
+  else
+    echo "==> Allowing port $PORT on tailscale0 (ufw)"
+    ufw allow in on tailscale0 to any port "$PORT" proto tcp comment 'agent-hub' >/dev/null
+  fi
   PREVIEW_RANGE=$(env_get PREVIEW_PORT_RANGE); PREVIEW_RANGE=${PREVIEW_RANGE:-8200-8299}
   echo "==> Allowing preview ports $PREVIEW_RANGE on tailscale0 (ufw)"
   ufw allow in on tailscale0 to any port "${PREVIEW_RANGE/-/:}" proto tcp comment 'agent-hub previews' >/dev/null
@@ -124,13 +161,13 @@ cat <<EOF
 
 Agent Hub is installed and listening on $(env_get BIND_HOSTS) port $PORT.
 
-Open http://$(env_get BIND_HOSTS | tr ',' '\n' | grep -v '^127\.' | head -1):$PORT in a browser on your tailnet.
+Open $( [[ -n $(env_get PUBLIC_URL) ]] && env_get PUBLIC_URL || echo "http://$(env_get BIND_HOSTS | tr ',' '\n' | grep -v '^127\.' | head -1):$PORT" ) in a browser on your tailnet.
 If you haven't yet:
   - set the admin password (until then every request gets 503):
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_password
        sudo systemctl restart agent-hub
-  - in the Tailscale admin console, add "tcp:$PORT" and "tcp:8200-8299" (previews) to the
-    ACL grant for this server.
+  - in the Tailscale admin console, allow this server's ports in the ACL grant:
+    "tcp:443" (HTTPS) or "tcp:$PORT" (plain HTTP), plus "tcp:8200-8299" for previews.
   - for agent runs, store the Claude token (from `claude setup-token`) and, to push
     branches, a fine-grained GitHub token:
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_secret claude

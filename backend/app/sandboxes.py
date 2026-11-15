@@ -64,6 +64,9 @@ class SandboxService:
         self._lock = threading.Lock()
         self._term_lock = threading.Lock()
         self.open_terminals = 0
+        # Called (from any thread) when a sandbox dies on its own: OOM, crash, removed outside.
+        self.on_problem: Callable[[Sandbox, str], None] | None = None
+        self._stopping: set[str] = set()  # sandboxes you're stopping/destroying: not a problem
 
     # ---- queries -----------------------------------------------------------
 
@@ -81,7 +84,7 @@ class SandboxService:
 
     def sync(self, sb: Sandbox) -> Sandbox:
         """Reconcile stored state with the container (it may have exited or been OOM-killed)."""
-        if sb.state not in ("running", "stopped") or not sb.container_id:
+        if sb.state not in ("running", "stopped") or not sb.container_id or sb.id in self._stopping:
             return sb
         try:
             status = self.backend.status(sb.container_id)
@@ -91,10 +94,25 @@ class SandboxService:
         if status == "running" and sb.state != "running":
             return self.db.update_sandbox(sb, state="running", error=None)
         if status in ("exited", "created", "dead") and sb.state == "running":
-            return self.db.update_sandbox(sb, state="stopped", error="Container exited unexpectedly")
+            info = self.backend.exit_info(sb.container_id)
+            if info.get("oom"):
+                why = f"Killed for using too much memory (limit {sb.memory / 2**30:.1f} GB)"
+            else:
+                why = f"Stopped unexpectedly (exit code {info.get('exit_code')})"
+            self.db.update_sandbox(sb, state="stopped", error=why)
+            self._problem(sb, why)
+            return sb
         if status == "missing":
-            return self.db.update_sandbox(sb, state="error", error="Container no longer exists")
+            self.db.update_sandbox(sb, state="error", error="Container no longer exists")
+            self._problem(sb, "Container no longer exists")
         return sb
+
+    def _problem(self, sb: Sandbox, why: str) -> None:
+        if self.on_problem:
+            try:
+                self.on_problem(sb, why)
+            except Exception:  # noqa: BLE001  (a notification must never break state tracking)
+                log.exception("problem notification failed")
 
     def _free_preview_port(self) -> int | None:
         """Lowest port in the pool not held by a sandbox that still exists. None when previews
@@ -102,6 +120,10 @@ class SandboxService:
         if not config.settings.previews_enabled:
             return None
         used = {sb.preview_port for sb in self.db.list_sandboxes()}
+        try:
+            used |= self.backend.published_ports()
+        except Exception:  # noqa: BLE001  (Docker trouble shows up at create; don't fail here)
+            log.warning("couldn't list published ports", exc_info=True)
         return next((p for p in config.settings.preview_ports if p not in used), None)
 
     def blockers(self, memory: int, exclude: str | None = None) -> list[str]:
@@ -174,17 +196,25 @@ class SandboxService:
         if sb.state == "stopped":
             return sb
         check_transition(sb.state, "stopped")
-        if sb.container_id:
-            self.backend.stop(sb.container_id)
-        self.db.update_sandbox(sb, state="stopped", error=None)
+        self._stopping.add(sb.id)
+        try:
+            if sb.container_id:
+                self.backend.stop(sb.container_id)
+            self.db.update_sandbox(sb, state="stopped", error=None)
+        finally:
+            self._stopping.discard(sb.id)
         self.db.audit(ip, "sandbox.stop", sb.id)
         return sb
 
     def destroy(self, sandbox_id: str, ip: str) -> None:
         sb = self.get(sandbox_id)
         check_transition(sb.state, "destroyed")
-        self.backend.remove(sb.container_id, sb.volume)
-        self.db.update_sandbox(sb, state="destroyed", container_id=None)
+        self._stopping.add(sb.id)
+        try:
+            self.backend.remove(sb.container_id, sb.volume)
+            self.db.update_sandbox(sb, state="destroyed", container_id=None)
+        finally:
+            self._stopping.discard(sb.id)
         self.db.audit(ip, "sandbox.destroy", sb.id, detail={"name": sb.name})
 
     def exec(self, sandbox_id: str, cmd: str | list[str], timeout: int | None, ip: str) -> ExecResult:

@@ -31,7 +31,7 @@ def settings(monkeypatch):
         max_concurrent_sandboxes=2, default_sandbox_memory=2 * GIB, max_sandbox_memory=4 * GIB,
         total_sandbox_memory=6 * GIB, memory_reserve=3 * GIB, default_sandbox_cpus=2,
         max_sandbox_cpus=4, min_free_disk=15 * GIB, io_device="", container_runtime="",
-        stats_interval=0, preview_bind="", preview_host="",
+        stats_interval=0, preview_bind="", preview_host="", public_url="", trust_proxy=False,
     )
     monkeypatch.setattr(config, "settings", s)
     auth.login_limiter._fails.clear()
@@ -78,13 +78,15 @@ def runs(svc, backend, workspace) -> RunManager:
 
 
 @pytest.fixture
-def client(svc, runs):
+def client(svc, runs, settings, tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, db_path=tmp_path / "t.db"))
     app.state.service = svc
     app.state.runs = runs
     with TestClient(app) as c:
         yield c
-    del app.state.service
-    del app.state.runs
+    for attr in ("service", "runs", "notifier", "monitor"):
+        if hasattr(app.state, attr):
+            delattr(app.state, attr)
 
 
 @pytest.fixture

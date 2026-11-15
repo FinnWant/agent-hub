@@ -62,6 +62,16 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS runs_sandbox ON runs(sandbox_id, created_at);
 CREATE INDEX IF NOT EXISTS runs_state ON runs(state);
 
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    endpoint    TEXT PRIMARY KEY,
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    label       TEXT,
+    created_at  REAL NOT NULL,
+    last_ok_at  REAL,
+    failures    INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS run_events (
     run_id  TEXT NOT NULL,
     seq     INTEGER NOT NULL,
@@ -233,6 +243,35 @@ class Database:
                 "SELECT seq, ts, data FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (run_id, after_seq, limit)).fetchall()
         return [{"seq": r["seq"], "ts": r["ts"], **json.loads(r["data"])} for r in rows]
+
+    # ---- push subscriptions --------------------------------------------------
+
+    def save_push_subscription(self, endpoint: str, p256dh: str, auth: str, label: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO push_subscriptions (endpoint, p256dh, auth, label, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, "
+                "label = excluded.label, failures = 0",
+                (endpoint, p256dh, auth, label, time.time()))
+
+    def list_push_subscriptions(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._conn.execute("SELECT * FROM push_subscriptions ORDER BY created_at")]
+
+    def delete_push_subscription(self, endpoint: str) -> bool:
+        with self._lock:
+            return self._conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,)).rowcount > 0
+
+    def touch_push_subscription(self, endpoint: str, ok: bool) -> None:
+        with self._lock:
+            if ok:
+                self._conn.execute("UPDATE push_subscriptions SET last_ok_at = ?, failures = 0 WHERE endpoint = ?",
+                                   (time.time(), endpoint))
+            else:
+                self._conn.execute("UPDATE push_subscriptions SET failures = failures + 1 WHERE endpoint = ?",
+                                   (endpoint,))
+                # A device that has failed many times in a row is gone for good.
+                self._conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ? AND failures >= 20", (endpoint,))
 
     # ---- audit -------------------------------------------------------------
 
