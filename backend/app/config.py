@@ -137,6 +137,13 @@ class Settings:
     budget_wait: int = _int("BUDGET_WAIT", 30 * 60)
     ask_wait: int = _int("ASK_WAIT", 90)
     meter_interval: float = float(os.getenv("METER_INTERVAL", "3"))
+    # Checkpoints (snapshots of the work while a run goes): at most this often, plus shortly
+    # after the agent edits files.
+    checkpoint_interval: float = float(os.getenv("CHECKPOINT_INTERVAL", "60"))
+    checkpoint_debounce: float = float(os.getenv("CHECKPOINT_DEBOUNCE", "15"))
+    # Loop breaker: the same failing tool call this many times among the last LOOP_WINDOW calls.
+    loop_repeats: int = _int("LOOP_REPEATS", 3)
+    loop_window: int = _int("LOOP_WINDOW", 10)
     run_timeout_max: int = _int("RUN_TIMEOUT_MAX", 4 * 60 * 60)
     run_max_turns_default: int = _int("RUN_MAX_TURNS_DEFAULT", 50)
     run_max_turns_max: int = _int("RUN_MAX_TURNS_MAX", 500)

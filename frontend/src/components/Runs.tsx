@@ -3,6 +3,7 @@ import { api, ApiError, runEventsUrl, type Run, type RunEvent, type RunState, ty
 import { ago } from "../lib/format";
 import { Icon, Kbd, useToast } from "./ui";
 import { RequestCard, usePendingRequests } from "./Requests";
+import { LedgerButton, ReportCard, Timeline } from "./RunExtras";
 
 const MAX_EVENTS = 5000; // cap the in-browser buffer
 const ACTIVE: RunState[] = ["queued", "running"];
@@ -69,6 +70,9 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
             setSelected(run.id);
             setContinuing(null);
           }} />
+        <div className="runs-side-tools">
+          <LedgerButton sandboxId={sb.id} disabled={sb.state !== "running"} />
+        </div>
         <div className="runs-history" role="listbox" aria-label="Runs">
           {runs?.length === 0 && <p className="muted" style={{ padding: "8px 4px", margin: 0 }}>No runs yet.</p>}
           {runs?.map((r) => (
@@ -390,6 +394,10 @@ function RunView({ initial, onChange, onContinue }: {
           <span>run {run.id}</span>
         </div>
         {run.error && !active && <div className="banner banner-danger" style={{ marginTop: 10 }}><div>{run.error}</div></div>}
+        {!active && run.report && (
+          <ReportCard run={run} onChange={(r) => { setRun(r); onChange(r); }} onContinue={onContinue} />
+        )}
+        <Timeline events={events} run={run} />
       </header>
       <div className="run-log" ref={logRef} onScroll={onScroll} aria-live="polite">
         {events.map((e) => <EventLine key={e.seq} e={e} />)}
@@ -507,6 +515,14 @@ function EventLine({ e }: { e: RunEvent }) {
       );
     case "answer":
       return <div className="ev ev-system">{e.text}</div>;
+    case "checkpoint":
+      return (
+        <div className="ev ev-checkpoint" title={e.files.join("\n")}>
+          <span className="ev-cp-dot" aria-hidden /> {e.text}
+        </div>
+      );
+    case "loop":
+      return <div className="ev ev-loop"><Icon name="refresh" size={14} /> {e.text}</div>;
     case "user":
       return (
         <div className="ev ev-user">

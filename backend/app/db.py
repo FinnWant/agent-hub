@@ -96,6 +96,16 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state, created_at);
 CREATE INDEX IF NOT EXISTS requests_run ON requests(run_id);
 
+CREATE TABLE IF NOT EXISTS checkpoints (
+    run_id  TEXT NOT NULL,
+    n       INTEGER NOT NULL,
+    sha     TEXT NOT NULL,
+    ts      REAL NOT NULL,
+    seq     INTEGER NOT NULL,       -- the run's last log event when it was taken
+    files   TEXT NOT NULL,          -- JSON: files changed since the previous checkpoint
+    PRIMARY KEY (run_id, n)
+);
+
 CREATE TABLE IF NOT EXISTS run_events (
     run_id  TEXT NOT NULL,
     seq     INTEGER NOT NULL,
@@ -124,6 +134,8 @@ MIGRATIONS = [
     ("runs", "usage", "TEXT"),                  # JSON, usage.RunUsage
     ("runs", "cost_est", "REAL"),
     ("runs", "paused_seconds", "REAL NOT NULL DEFAULT 0"),  # waiting on the owner; not counted
+    ("runs", "report", "TEXT"),                 # JSON: the handoff report (report.py)
+    ("runs", "rewound_to", "INTEGER"),          # checkpoint the branch was put back to
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -190,6 +202,8 @@ class Run:
     usage: str | None = None
     cost_est: float | None = None
     paused_seconds: float = 0.0
+    report: str | None = None
+    rewound_to: int | None = None
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)
@@ -332,6 +346,16 @@ class Database:
         args.append(limit)
         with self._lock:
             return [dict(r) for r in self._conn.execute(q, args).fetchall()]
+
+    def add_checkpoint(self, run_id: str, n: int, sha: str, seq: int, files: list[str]) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO checkpoints (run_id, n, sha, ts, seq, files) VALUES (?, ?, ?, ?, ?, ?)",
+                               (run_id, n, sha, time.time(), seq, json.dumps(files)))
+
+    def checkpoints(self, run_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM checkpoints WHERE run_id = ? ORDER BY n", (run_id,)).fetchall()
+        return [{**dict(r), "files": json.loads(r["files"])} for r in rows]
 
     def last_run_seq(self, run_id: str) -> int:
         with self._lock:

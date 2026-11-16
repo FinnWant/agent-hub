@@ -58,6 +58,13 @@ class Workspace(Protocol):
     def push(self, sb: Sandbox, run: Run, log) -> bool: ...
 
 
+def parse_stats(out: str) -> dict:
+    first, _, names = out.strip("\n").partition("\n")
+    nums = {k: int(v) for v, k in re.findall(r"(\d+) (file|insertion|deletion)", first)}
+    return {"files": nums.get("file", 0), "insertions": nums.get("insertion", 0),
+            "deletions": nums.get("deletion", 0), "names": [n for n in names.splitlines() if n.strip()]}
+
+
 def github_repo(url: str) -> bool:
     return urlsplit(url).hostname == "github.com"
 
@@ -87,6 +94,8 @@ echo main
 BRANCH_SCRIPT = """set -e
 git config user.name "$AH_GIT_NAME"
 git config user.email "$AH_GIT_EMAIL"
+mkdir -p .git/info
+grep -qxF '/.kiln/' .git/info/exclude 2>/dev/null || echo '/.kiln/' >> .git/info/exclude
 if [ -n "$(git status --porcelain)" ]; then
   echo "DIRTY $(git symbolic-ref --short -q HEAD || git rev-parse --short HEAD)"; exit 0
 fi
@@ -116,6 +125,38 @@ if ! git diff --cached --quiet; then
 fi
 echo "$made $(git rev-parse "$AH_BRANCH") $(git rev-list --count "$AH_BASE..$AH_BRANCH")"
 """
+
+# A checkpoint: the whole working tree (untracked files too, ignored ones not) as a commit on top
+# of HEAD, via a temporary index so the agent's own index and branch are untouched. Kept as
+# refs/kiln/<run>/<n> (never pushed); skipped when nothing changed since the last one.
+CHECKPOINT_SCRIPT = """set -e
+[ -d .git ] || { echo NOREPO; exit 0; }
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+export GIT_INDEX_FILE="$tmp"
+git read-tree HEAD 2>/dev/null || true
+git add -A
+tree=$(git write-tree)
+prev=$(git rev-parse -q --verify "refs/kiln/$AH_RUN/last" 2>/dev/null || git rev-parse HEAD)
+if [ "$tree" = "$(git rev-parse "$prev^{tree}")" ]; then echo SAME; exit 0; fi
+c=$(git commit-tree "$tree" -p "$(git rev-parse HEAD)" -m "Kiln checkpoint $AH_N of run $AH_RUN")
+git update-ref "refs/kiln/$AH_RUN/$AH_N" "$c"
+git update-ref "refs/kiln/$AH_RUN/last" "$c"
+echo "SNAP $c"
+git diff --name-only "$prev" "$c" | head -n 50
+"""
+
+# Put the run's branch back to a checkpoint (the run has ended; ignored files such as the
+# ledger stay).
+REWIND_SCRIPT = """set -e
+git rev-parse -q --verify "$AH_SHA^{commit}" >/dev/null || { echo NOSHA; exit 0; }
+git checkout -q -f "$AH_BRANCH"
+git reset -q --hard "$AH_SHA"
+git clean -q -fd
+echo OK
+"""
+
+STATS_SCRIPT = """git diff --shortstat "$AH_BASE...$AH_BRANCH" 2>/dev/null; echo; git diff --name-only "$AH_BASE...$AH_BRANCH" 2>/dev/null | head -n 200"""
 
 DEFAULT_BRANCH_SCRIPT = """b=$(git symbolic-ref --short -q refs/remotes/origin/HEAD) && echo "${b#origin/}" && exit 0
 git symbolic-ref --short HEAD"""
@@ -241,6 +282,25 @@ class GitWorkspace:
             log(f"Committed the agent's changes as {sha[:10]}")
         return Finalized(commit_sha=sha, commits=int(count), committed_now=made == "1")
 
+    def checkpoint(self, sb: Sandbox, run: Run, n: int) -> tuple[str, list[str]] | None:
+        """(commit, files changed since the previous checkpoint), or None if nothing changed."""
+        out = self._sh(sb, CHECKPOINT_SCRIPT, {"AH_RUN": run.id, "AH_N": str(int(n))}, timeout=120).splitlines()
+        snap = next((i for i, line in enumerate(out) if line.startswith("SNAP ")), None)
+        if snap is None:
+            return None
+        return out[snap].split()[1], [f for f in out[snap + 1:] if f]
+
+    def rewind(self, sb: Sandbox, run: Run, sha: str) -> None:
+        if not re.fullmatch(r"[0-9a-f]{40}", sha) or not BRANCH_RE.fullmatch(run.branch or ""):
+            raise WorkspaceError("Bad checkpoint")
+        if self._sh(sb, REWIND_SCRIPT, {"AH_SHA": sha, "AH_BRANCH": run.branch or ""}).splitlines()[-1] != "OK":
+            raise WorkspaceError("That checkpoint is no longer in the sandbox's repository")
+
+    def stats(self, sb: Sandbox, run: Run) -> dict:
+        """Files changed, insertions and deletions of the run's branch against its base."""
+        out = self._sh(sb, STATS_SCRIPT, {"AH_BASE": run.base_branch or "", "AH_BRANCH": run.branch or ""})
+        return parse_stats(out)
+
     def push(self, sb: Sandbox, run: Run, log) -> bool:
         s = config.settings
         branch = run.branch or ""
@@ -298,6 +358,19 @@ class FakeWorkspace:
         self.started_from = start_from
         log(f"On branch {run.branch} from {start_from or base}")
         return base
+
+    def checkpoint(self, sb: Sandbox, run: Run, n: int) -> tuple[str, list[str]] | None:
+        self.checkpoints = getattr(self, "checkpoints", 0)
+        if not getattr(self, "changes", True):
+            return None
+        self.checkpoints += 1
+        return (f"{n:02d}" * 20)[:40], [f"src/file{n}.py"]
+
+    def rewind(self, sb: Sandbox, run: Run, sha: str) -> None:
+        self.rewound = sha
+
+    def stats(self, sb: Sandbox, run: Run) -> dict:
+        return {"files": 2, "insertions": 30, "deletions": 4, "names": ["README.md", "src/app.py"]}
 
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized:
         sha = (run.id * 4)[:40]

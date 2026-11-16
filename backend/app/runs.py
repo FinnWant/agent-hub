@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 from .docker_backend import BackendError
 from .hooks import HookCall, HookReply
+from .loops import EDITS, LoopWatch
 from .runners import MAX_MESSAGE, AgentRunner, RunError, RunProcess, RunSpec
 from .templates import TEMPLATES
 from .sandboxes import CapacityError, InvalidTransition, NotFound, SandboxError, SandboxService
@@ -66,6 +67,25 @@ async def mark_compaction(manager: RunManager, run: Run, call: HookCall) -> None
     manager._sys(run, f"The agent's context is being compacted ({how}); it continues from a summary")
 
 
+def overflow_path(run_id: str):
+    from pathlib import Path
+
+    return Path(config.settings.db_path).parent / "run-logs" / f"{run_id}.jsonl.gz"
+
+
+def overflow(run_id: str, event: dict[str, Any]) -> None:
+    """Events past RUN_MAX_EVENTS: appended to a gzip file next to the database (the full log)."""
+    import gzip
+
+    path = overflow_path(run_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(path, "at") as f:
+            f.write(json.dumps(event) + "\n")
+    except OSError:
+        log.warning("couldn't keep the overflow log of run %s", run_id, exc_info=True)
+
+
 def outcome(run: Run) -> str:
     """How a finished run ended, in words for the agent continuing it."""
     if run.state == "succeeded":
@@ -87,7 +107,9 @@ def default_hooks() -> list[HookHandler]:
     from .owner import owner_hooks
     from .verify import stop_handler
 
-    return [HookHandler("PreCompact", mark_compaction), stop_handler(), *owner_hooks()]
+    from .ledger import ledger_hook
+
+    return [HookHandler("PreCompact", mark_compaction), stop_handler(), *owner_hooks(), ledger_hook()]
 
 
 class RunManager:
@@ -133,18 +155,22 @@ class RunManager:
     def emit(self, run: Run, event: dict[str, Any], runner_state: dict[str, Any] | None = None) -> None:
         """Store and publish an event; `runner_state` (if given) is stored with it atomically."""
         event = Redactor.from_settings().obj(event)
-        seq = self._seq.get(run.id, 0)
+        seq = self._seq.get(run.id)
+        if seq is None:  # e.g. a rewind after the run ended: carry on from the stored log
+            seq = self.db.last_run_seq(run.id) + 1
         self._seq[run.id] = seq + 1
         ts = time.time()
         if seq < config.settings.run_max_events or event["type"] in ("status", "done", "cost"):
             self.db.add_run_event(run.id, seq, ts, event, runner_state)
-        elif run.id not in self._dropped:
-            self._dropped.add(run.id)
-            self.db.add_run_event(run.id, seq, ts, {"type": "log", "kind": "system",
-                                                    "text": "Log limit reached; further output isn't stored."},
-                                  runner_state)
-        elif runner_state is not None:
-            self.db.add_run_event(run.id, seq, ts, None, runner_state)
+        else:
+            if run.id not in self._dropped:
+                self._dropped.add(run.id)
+                self.db.add_run_event(run.id, seq, ts, {"type": "log", "kind": "system",
+                                                        "text": "Log limit reached; the rest is kept in the full "
+                                                                "log (download it from the run)."}, runner_state)
+            elif runner_state is not None:
+                self.db.add_run_event(run.id, seq, ts, None, runner_state)
+            overflow(run.id, {"seq": seq, "ts": ts, **event})
         for q in list(self._subscribers.get(run.id, ())):
             q.put_nowait({"seq": seq, "ts": ts, **event})
 
@@ -326,6 +352,115 @@ class RunManager:
                        # one matcher only if every handler of the event agrees; else all calls
                        hook_matchers={e: next(iter(m)) for e, m in matchers.items() if len(m) == 1 and None not in m})
 
+    async def _ledger(self, sb, run: Run) -> None:
+        if run.runner == "claude-code":
+            from .ledger import refresh_quietly
+
+            await refresh_quietly(self, self.sandboxes.get(sb.id), run)
+
+    # ---- checkpoints, loops, report --------------------------------------------
+
+    def _background(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._hook_tasks.add(task)
+        task.add_done_callback(self._hook_tasks.discard)
+
+    async def _checkpoint_loop(self, run: Run, sb, poke: asyncio.Event) -> None:
+        s = config.settings
+        while True:
+            try:
+                await asyncio.wait_for(poke.wait(), s.checkpoint_interval)
+            except TimeoutError:
+                pass
+            if poke.is_set():
+                poke.clear()
+                await asyncio.sleep(s.checkpoint_debounce)  # let a burst of edits finish
+            await self._checkpoint(run, sb)
+
+    async def _checkpoint(self, run: Run, sb) -> None:
+        if not hasattr(self.workspace, "checkpoint") or not run.base_branch:
+            return
+        n = len(self.db.checkpoints(run.id)) + 1
+        try:
+            res = await asyncio.to_thread(self.workspace.checkpoint, sb, run, n)
+        except Exception:  # noqa: BLE001  (e.g. the agent holds a git lock; next time then)
+            log.info("no checkpoint for run %s this time", run.id, exc_info=True)
+            return
+        if res is None:
+            return
+        sha, files = res
+        self.db.add_checkpoint(run.id, n, sha, self._seq.get(run.id, 1) - 1, files)
+        self.emit(run, {"type": "log", "kind": "checkpoint", "n": n, "sha": sha, "files": files[:20],
+                        "text": f"Checkpoint {n}: {len(files)} file{'' if len(files) == 1 else 's'} changed"})
+
+    async def rewind(self, run_id: str, n: int, ip: str) -> Run:
+        """Put a finished run's branch back to one of its checkpoints."""
+        run = self.get(run_id)
+        if run.active:
+            raise InvalidTransition("Stop the run before rewinding it")
+        if active := self.active_for(run.sandbox_id):
+            raise InvalidTransition(f"Run {active.id} is going in this sandbox")
+        cp = next((c for c in self.db.checkpoints(run_id) if c["n"] == n), None)
+        if cp is None:
+            raise NotFound("No such checkpoint")
+        sb = self.sandboxes.get(run.sandbox_id)
+        if sb.state != "running":
+            raise InvalidTransition("Start the sandbox first")
+        await asyncio.to_thread(self.workspace.rewind, sb, run, cp["sha"])
+        self.db.update_run(run, rewound_to=n, commit_sha=cp["sha"])
+        self.db.audit(ip, "run.rewind", run.sandbox_id, detail={"run": run_id, "checkpoint": n})
+        self.emit(run, {"type": "log", "kind": "system",
+                        "text": f"Rewound {run.branch} to checkpoint {n}; continue the run to carry on from there"})
+        return run
+
+    async def _loop_tripped(self, run: Run, proc: RunProcess, watch: LoopWatch, why: str) -> None:
+        watch.trips += 1
+        self.emit(run, {"type": "log", "kind": "loop", "text": f"The agent {why}"})
+        if watch.trips == 1 and getattr(proc, "can_send", False):
+            try:
+                await proc.send(f"[Kiln] You {why}. Stop and step back: work out why it keeps failing before trying "
+                                "again, and take a different approach. If the sandbox itself is in the way (network "
+                                "rules, no root), work around it or say so in your summary.")
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        gw, digest = self._gateway_for(run, proc)
+        if gw is not None:
+            await asyncio.to_thread(gw.hold, digest, True)
+        self.owner.create(run, "stuck", "The agent seems stuck",
+                          f"It {why}" + (", even after being told to step back" if watch.trips > 1 else "") +
+                          ". Its API calls are on hold. Let it continue (optionally with advice, which is sent to "
+                          "it), or stop the run.", ["Continue", "Stop"], config.settings.budget_wait)
+
+    async def stuck_decided(self, run_id: str, ans: dict[str, Any] | None) -> None:
+        run = self.db.get_run(run_id)
+        if run is None or not run.active:
+            return
+        proc = self._procs.get(run_id)
+        if ans and ans.get("choice") == "continue":
+            gw, digest = self._gateway_for(run, proc)
+            if gw is not None:
+                await asyncio.to_thread(gw.hold, digest, False)
+            if ans.get("text") and proc is not None and getattr(proc, "can_send", False):
+                await proc.send(f"[Owner] {ans['text']}")
+            return
+        self._sys(run, "Stopped: the agent was stuck" + ("" if ans else " and nobody answered"))
+        await self.cancel(run_id, "owner" if ans else "system", reason="cancelled")
+
+    async def _report(self, sb, run: Run) -> None:
+        from .report import build
+
+        stats = None
+        if run.base_branch and hasattr(self.workspace, "stats"):
+            try:
+                stats = await asyncio.to_thread(self.workspace.stats, sb, run)
+            except Exception:  # noqa: BLE001
+                log.info("no diff stats for run %s", run.id, exc_info=True)
+        fresh = self.db.get_run(run.id) or run
+        report = build(fresh, self._last_result(run.id), stats, len(self.db.checkpoints(run.id)),
+                       self.db.list_requests(run_id=run.id, limit=200), self.db.run_events(run.id))
+        self.db.update_run(run, report=json.dumps(report))
+
     # ---- waiting on the owner -------------------------------------------------
 
     def pause_clock(self, run: Run, delta: int) -> None:
@@ -487,6 +622,7 @@ class RunManager:
             limit = max(1.0, run.timeout + (run.paused_seconds or 0) - (time.time() - (run.started_at or time.time())))
         proc: RunProcess | None = None
         meter: asyncio.Task | None = None
+        checkpoints: asyncio.Task | None = None
         try:
             if run.id in self._cancel_reason:
                 raise asyncio.CancelledError
@@ -497,6 +633,7 @@ class RunManager:
                 self.db.update_run(run, base_branch=base)
                 if not sb.base_branch:
                     self.db.update_sandbox(sb, base_branch=base)
+                await self._ledger(sb, run)
                 if parent:
                     self._continue(spec, run, parent)
                 proc = await runner.start(spec)
@@ -520,6 +657,9 @@ class RunManager:
             if run.id in self._cancel_reason:
                 await proc.cancel()
             meter = asyncio.create_task(self._meter_loop(run, proc))
+            poke = asyncio.Event()
+            checkpoints = asyncio.create_task(self._checkpoint_loop(run, sb, poke))
+            watch = LoopWatch()
             try:
                 async with asyncio.timeout(limit) as clock:
                     self._timeouts[run.id] = clock
@@ -531,6 +671,12 @@ class RunManager:
                                 self.db.add_run_event(run.id, 0, 0, None, self._progress(run, proc))
                             continue
                         self.emit(run, event, self._progress(run, proc) if progress else None)
+                        if event.get("kind") == "tool":
+                            watch.tool(event.get("name", ""), event.get("text", ""))
+                            if event.get("name") in EDITS:
+                                poke.set()
+                        elif event.get("kind") == "tool_result" and (why := watch.result(bool(event.get("is_error")))):
+                            self._background(self._loop_tripped(run, proc, watch, why))
             except TimeoutError:
                 self._cancel_reason.setdefault(run.id, "timed_out")
                 self._sys(run, f"Time limit reached ({run.timeout // 60} min); stopping the agent")
@@ -556,6 +702,8 @@ class RunManager:
             error = f"Internal error: {e}"
         finally:
             self._timeouts.pop(run.id, None)
+            if checkpoints is not None:
+                checkpoints.cancel()
             if meter is not None:
                 meter.cancel()
                 await self._meter_once(run, proc)  # the last calls, before the key goes
@@ -605,6 +753,9 @@ class RunManager:
                            pushed=pushed, exit_code=outcome.exit_code if outcome else None,
                            cost_usd=outcome.cost_usd if outcome else None,
                            num_turns=outcome.num_turns if outcome else None)
+        if run.base_branch:
+            await self._ledger(sb, run)
+        await self._report(sb, run)
         self.emit(run, {"type": "done", "state": state, "error": error, "commit": commit,
                         "branch": run.branch, "pushed": pushed})
         if self.on_finished:

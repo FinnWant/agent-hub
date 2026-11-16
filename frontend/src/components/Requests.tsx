@@ -36,6 +36,7 @@ const KIND_LABEL: Record<OwnerRequest["kind"], string> = {
   approval: "Approval",
   question: "Question",
   budget: "Budget",
+  stuck: "Stuck",
 };
 
 function minutesLeft(deadline: number | null): string | null {
@@ -114,6 +115,15 @@ export function RequestCard({ req, onDone, showSandbox = false }: {
             <button className="btn btn-primary" type="submit" disabled={busy || !text.trim()}>Answer</button>
           </form>
         </>
+      )}
+
+      {pending && req.kind === "stuck" && (
+        <div className="request-actions">
+          <input className="input" placeholder="Advice for the agent (optional)" maxLength={4000}
+            value={text} onChange={(e) => setText(e.target.value)} />
+          <button className="btn btn-danger" disabled={busy} onClick={() => send({ choice: "stop" })}>Stop the run</button>
+          <button className="btn btn-primary" disabled={busy} onClick={() => send({ choice: "continue", text })}>Continue</button>
+        </div>
       )}
 
       {pending && req.kind === "budget" && (

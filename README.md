@@ -261,6 +261,24 @@ queued → running → succeeded | failed | cancelled | timed_out
      (10 min) denies them. A guard rail for the agent's judgement, not a security boundary.
    - *Questions*: the agent can run `kiln-ask "question" "option" …`; it waits `ASK_WAIT` (90 s),
      and a later answer reaches the agent as a message.
+   **Ledger.** `/workspace/.kiln/LEDGER.md` (never committed) holds the agent's plan,
+   decisions and what's done or not, plus a block Kiln writes: the latest request and how each
+   run ended. The agent reads it first and keeps it current; after a context compaction a Kiln
+   hook gives it back. Open it from the Runs tab (Ledger) to read or correct it.
+
+   **Checkpoints.** While the agent works, Kiln snapshots the working tree (shortly after file
+   edits, at most every `CHECKPOINT_INTERVAL`) as commits under `refs/kiln/<run>/` (never on the
+   branch, never pushed). A finished run can be rewound to any checkpoint and continued.
+
+   **Loop breaker.** The same tool call failing `LOOP_REPEATS` times in a row with no sign of
+   progress (or the same few calls over and over, changing nothing) gets the agent a message to
+   step back; a second time, its API calls are held and you're asked to let it continue (with
+   advice) or stop it.
+
+   **Report and timeline.** When a run ends, its report puts the agent's summary (Done, Not done,
+   Assumptions, How to verify, Risks) next to what Kiln measured: time, files and lines changed,
+   checks, cost, requests, compactions, loops, checkpoints. The timeline shows what the agent did
+   when; the full log (past the stored `RUN_MAX_EVENTS`) can be downloaded.
 6. **Commit** everything the agent left on the branch (also after cancel or timeout, so the
    work can be reviewed).
 7. **Push** (only if enabled for the sandbox, the run succeeded, its checks didn't fail, and the repository is on

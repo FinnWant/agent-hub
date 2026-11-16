@@ -549,6 +549,10 @@ def run_out(run: Run) -> dict:
     out = run.to_dict()
     out.pop("runner_state", None)  # internal (offsets, gateway key digest)
     out["usage"] = RunUsage.load(run.usage).public() if run.usage else None
+    try:
+        out["report"] = json.loads(run.report) if run.report else None
+    except ValueError:
+        out["report"] = None
     runs = getattr(app.state, "runs", None)
     out["can_message"] = bool(runs and run.active and runs.can_send(run.id))
     return out
@@ -624,6 +628,69 @@ async def answer_request(req_id: str, body: Answer, _: Admin, request: Request, 
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
     return request_out(row, svc)
+
+
+# ---------------------------------------------------------------------------
+# Ledger, checkpoints, full log
+# ---------------------------------------------------------------------------
+
+class LedgerText(BaseModel):
+    text: str = Field(max_length=60_000)
+
+
+@app.get("/api/sandboxes/{sandbox_id}/ledger")
+def get_ledger(sandbox_id: str, _: Admin, svc: Svc, runs: Runs) -> dict:
+    from . import ledger
+
+    sb = svc.get(sandbox_id)
+    if sb.state != "running":
+        raise HTTPException(409, "Start the sandbox to read its ledger")
+    text = ledger.read(runs, sb)
+    return {"exists": text is not None, "text": text or ""}
+
+
+@app.put("/api/sandboxes/{sandbox_id}/ledger")
+def put_ledger(sandbox_id: str, body: LedgerText, _: Admin, request: Request, svc: Svc, runs: Runs) -> dict:
+    from . import ledger
+
+    sb = svc.get(sandbox_id)
+    if sb.state != "running":
+        raise HTTPException(409, "Start the sandbox to edit its ledger")
+    ledger.write(runs, sb, body.text)
+    svc.db.audit(auth.client_ip(request), "sandbox.ledger", sb.id, detail={"bytes": len(body.text)})
+    return {"exists": True, "text": body.text}
+
+
+@app.get("/api/runs/{run_id}/checkpoints")
+def run_checkpoints(run_id: str, _: Admin, runs: Runs) -> list[dict]:
+    runs.get(run_id)
+    return runs.db.checkpoints(run_id)
+
+
+class Rewind(BaseModel):
+    n: int = Field(ge=1, le=100_000)
+
+
+@app.post("/api/runs/{run_id}/rewind")
+async def rewind_run(run_id: str, body: Rewind, _: Admin, request: Request, runs: Runs) -> dict:
+    return run_out(await runs.rewind(run_id, body.n, auth.client_ip(request)))
+
+
+@app.get("/api/runs/{run_id}/log/full")
+def run_full_log(run_id: str, _: Admin, runs: Runs) -> Response:
+    """Every event of the run as JSON lines: the stored log plus anything past RUN_MAX_EVENTS."""
+    import gzip
+
+    from .runs import overflow_path
+
+    runs.get(run_id)
+    lines = [json.dumps(e) for e in runs.db.run_events(run_id, limit=10**9)]
+    path = overflow_path(run_id)
+    if path.is_file():
+        with gzip.open(path, "rt") as f:
+            lines += [line.rstrip("\n") for line in f]
+    return Response("\n".join(lines) + "\n", media_type="application/x-ndjson",
+                    headers={"Content-Disposition": f'attachment; filename="kiln-run-{run_id}.jsonl"'})
 
 
 class RunMessage(BaseModel):

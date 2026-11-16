@@ -65,6 +65,10 @@ export interface Run {
   cost_est: number | null;
   /** Seconds spent waiting on the owner (not counted against the time limit). */
   paused_seconds: number;
+  /** The handoff report, once the run has ended. */
+  report: RunReport | null;
+  /** The checkpoint the branch was put back to, if it was. */
+  rewound_to: number | null;
   /** The agent is running and reads messages (see `api.sendRunMessage`). */
   can_message: boolean;
 }
@@ -75,7 +79,7 @@ export interface OwnerRequest {
   run_id: string;
   sandbox_id: string;
   sandbox_name: string | null;
-  kind: "approval" | "question" | "budget";
+  kind: "approval" | "question" | "budget" | "stuck";
   state: "pending" | "answered" | "expired" | "closed";
   title: string;
   body: string;
@@ -85,6 +89,27 @@ export interface OwnerRequest {
   answered_at: number | null;
   deadline: number | null;
   data: { spent?: number; budget?: number; tool?: string; rule?: string };
+}
+
+export interface RunReport {
+  summary: string;
+  sections: Partial<Record<"Done" | "Not done" | "Assumptions" | "How to verify" | "Risks", string>>;
+  facts: {
+    state: RunState; error: string | null; minutes: number; waited_minutes: number;
+    checks: "passed" | "failed" | null; check_rounds: number;
+    files: number | null; insertions: number | null; deletions: number | null; file_names: string[];
+    commit: string | null; pushed: boolean; cost_est: number | null; api_calls: number | null;
+    checkpoints: number; questions: number; approvals: number; compactions: number; loops: number;
+  };
+}
+
+export interface Checkpoint {
+  run_id: string;
+  n: number;
+  sha: string;
+  ts: number;
+  seq: number;
+  files: string[];
 }
 
 export interface RunUsage {
@@ -107,6 +132,8 @@ export type RunEvent = { seq: number; ts: number } & (
   | { type: "log"; kind: "request"; request: string; request_kind: OwnerRequest["kind"]; title: string;
       text: string; options: string[] }
   | { type: "log"; kind: "answer"; request: string; state: "answered" | "expired"; text: string }
+  | { type: "log"; kind: "checkpoint"; n: number; sha: string; files: string[]; text: string }
+  | { type: "log"; kind: "loop"; text: string }
   | { type: "status"; state: RunState }
   | { type: "cost"; cost_usd: number | null; turns: number | null; duration_ms: number | null }
   | { type: "done"; state: RunState; error: string | null; commit: string | null; branch: string; pushed: boolean }
@@ -320,6 +347,11 @@ export const api = {
       Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))}`),
   answerRequest: (id: string, body: { choice?: string; text?: string; amount?: number }) =>
     request<OwnerRequest>("POST", `/requests/${encodeURIComponent(id)}/answer`, body),
+  ledger: (sandboxId: string) => request<{ exists: boolean; text: string }>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/ledger`),
+  saveLedger: (sandboxId: string, text: string) =>
+    request<{ exists: boolean; text: string }>("PUT", `/sandboxes/${encodeURIComponent(sandboxId)}/ledger`, { text }),
+  checkpoints: (runId: string) => request<Checkpoint[]>("GET", `/runs/${encodeURIComponent(runId)}/checkpoints`),
+  rewind: (runId: string, n: number) => request<Run>("POST", `/runs/${encodeURIComponent(runId)}/rewind`, { n }),
   sendRunMessage: (id: string, text: string) =>
     request<{ ok: boolean }>("POST", `/runs/${encodeURIComponent(id)}/messages`, { text }),
   files: (id: string, path: string) =>

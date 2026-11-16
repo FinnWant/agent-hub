@@ -474,6 +474,37 @@ def test_real_claude_code_asks_the_owner_and_is_metered(real):
     assert u.requests > 0 and u.output > 0 and u.cost > 0 and u.model.startswith("claude-"), done.usage
 
 
+def test_real_claude_code_ledger_checkpoints_and_report(real, monkeypatch):
+    """With your Claude token (skipped if none): the ledger is in the sandbox, checkpoints are
+    taken while the agent edits, and its summary uses the report's headings."""
+    import asyncio
+    import dataclasses
+
+    from app import config, ledger
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, checkpoint_interval=5,
+                                                                checkpoint_debounce=1))
+    svc, created = real
+    sb = _sandbox(svc, created, "run-ledger")
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="Create a.txt containing a. Then run `sleep 8`. Then create b.txt "
+                      "containing b.", runner="claude-code", timeout=300, max_turns=10, ip="t")
+    asyncio.run(runs._execute(run))
+    done = svc.db.get_run(run.id)
+    evs = svc.db.run_events(run.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    text = ledger.read(runs, svc.get(sb.id)) or ""
+    assert ledger.BEGIN in text and run.id in text, text[:500]
+    assert svc.db.checkpoints(run.id), "no checkpoint was taken"
+    import json
+
+    rep = json.loads(done.report)
+    assert "Done" in rep["sections"], rep["summary"][:500]
+    assert rep["facts"]["files"] == 2 and rep["facts"]["checkpoints"] >= 1
+
+
 # ---------------------------------------------------------------------------
 # Files, diff, preview, stats, prune (phase 4)
 # ---------------------------------------------------------------------------

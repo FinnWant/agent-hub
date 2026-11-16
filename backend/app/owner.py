@@ -9,6 +9,8 @@ and under "Needs you", and pushed as a notification; the run's clock stops while
   budget    the run's estimated spend reached its budget: the gateway holds its API calls.
             Extend raises the budget and lets them through; Stop, or no answer within
             BUDGET_WAIT, stops the run.
+  stuck     the loop breaker (loops.py) tripped a second time: the agent's calls are held.
+            Continue (advice, if given, is sent to the agent) or Stop; no answer stops it.
 
 Approval rules (one per line, # comments): `Bash: <text>` matches shell commands containing the
 text; `Edit: <text>` / `Write: <text>` match file paths (Edit covers MultiEdit and NotebookEdit
@@ -35,7 +37,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-KINDS = ("approval", "question", "budget")
+KINDS = ("approval", "question", "budget", "stuck")
 FILE_TOOLS = {"Edit": ("Edit", "MultiEdit", "NotebookEdit"), "Write": ("Write",)}
 MAX_RULES = 50
 
@@ -123,7 +125,8 @@ class Owner:
             self._schedule(rid, wait)
         if self.notify:
             sb = self.m.sandboxes.get(run.sandbox_id)
-            what = {"approval": "wants to", "question": "asks", "budget": "is over its budget"}[kind]
+            what = {"approval": "wants to", "question": "asks", "budget": "is over its budget",
+                    "stuck": "seems stuck"}[kind]
             try:
                 self.notify({"kind": "run.needs_you", "title": f"{sb.name}: the agent {what}",
                              "body": row["title"][:160], "sandbox": run.sandbox_id, "run": run.id,
@@ -162,7 +165,7 @@ class Owner:
             raise ValueError(f"This request is already {row['state']}")
         options = json.loads(row["options"])
         kind = row["kind"]
-        if kind in ("approval", "budget") and choice not in [o.lower() for o in options]:
+        if kind in ("approval", "budget", "stuck") and choice not in [o.lower() for o in options]:
             raise ValueError(f"Choose one of: {', '.join(options)}")
         if kind == "question" and not (text or "").strip() and not choice:
             raise ValueError("Write an answer")
@@ -234,6 +237,8 @@ class Owner:
                                 f"{ans.get('text') or ans.get('choice')}")
             elif kind == "budget":
                 await self.m.budget_decided(run_id, ans)
+            elif kind == "stuck":
+                await self.m.stuck_decided(run_id, ans)
         except Exception:  # noqa: BLE001  (the run may be ending)
             log.warning("couldn't deliver the answer to request %s", row["id"], exc_info=True)
 

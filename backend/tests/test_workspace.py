@@ -197,3 +197,49 @@ def test_continuing_branches_from_the_previous_run(env, origin):
         w.prepare(sb, run("cccccccccccc"), lambda _: None, start_from="agent/dddddddddddd")
     with pytest.raises(WorkspaceError, match="Can't continue"):
         w.prepare(sb, run("eeeeeeeeeeee"), lambda _: None, start_from="main; rm -rf /")
+
+
+def test_checkpoints_rewind_and_stats(env, origin):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r = run("aaaaaaaaaaaa")
+    r.base_branch = sb.base_branch = w.prepare(sb, r, lambda _: None)
+    (b.ws / "a.txt").write_text("one")
+    (b.ws / "new.txt").write_text("untracked files count too")
+    git("add", "a.txt", cwd=b.ws)  # the agent's own index: left alone by checkpoints
+    sha1, files = w.checkpoint(sb, r, 1)
+    assert sorted(files) == ["a.txt", "new.txt"]
+    assert w.checkpoint(sb, r, 2) is None  # nothing changed since
+    assert git("diff", "--cached", "--name-only", cwd=b.ws).split() == ["a.txt"]
+    (b.ws / "a.txt").write_text("two")
+    sha2, files = w.checkpoint(sb, r, 2)
+    assert files == ["a.txt"] and sha2 != sha1
+    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=b.ws).strip() == r.branch  # the branch didn't move
+    assert git("rev-parse", "refs/kiln/aaaaaaaaaaaa/1", cwd=b.ws).strip() == sha1
+
+    (b.ws / "a.txt").write_text("three, bad")
+    w.finalize(sb, r, lambda _: None)
+    st = w.stats(sb, r)
+    assert st["files"] == 2 and st["insertions"] == 2 and sorted(st["names"]) == ["a.txt", "new.txt"]
+
+    (b.ws / "stray.txt").write_text("made after the run")
+    w.rewind(sb, r, sha1)
+    assert (b.ws / "a.txt").read_text() == "one" and not (b.ws / "stray.txt").exists()
+    assert git("rev-parse", r.branch, cwd=b.ws).strip() == sha1
+    with pytest.raises(WorkspaceError):
+        w.rewind(sb, r, "0" * 40)
+    with pytest.raises(WorkspaceError):
+        w.rewind(sb, r, "HEAD; rm -rf /")
+
+
+def test_kiln_folder_never_counts_as_a_change(env, origin):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    (b.ws / ".kiln").mkdir()
+    (b.ws / ".kiln" / "LEDGER.md").write_text("# notes")
+    fin = w.finalize(sb, r1, lambda _: None)
+    assert fin.commits == 0  # the ledger isn't committed
+    w.prepare(sb, run("bbbbbbbbbbbb"), lambda _: None)  # and doesn't make the tree dirty
+    assert (b.ws / ".kiln" / "LEDGER.md").exists()
