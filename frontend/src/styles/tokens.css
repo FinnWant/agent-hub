@@ -7,6 +7,7 @@
   --slate-200: #cdd5e1;
   --slate-300: #a9b4c6;
   --slate-400: #8291a8;
+  --slate-450: #75839a;
   --slate-500: #5e6c83;
   --slate-600: #434f63;
   --slate-700: #2c3546;
@@ -15,6 +16,7 @@
   --slate-900: #121722;
   --slate-925: #0e121b;
   --slate-950: #0a0d14;
+  --slate-975: #080a10;
   --slate-1000: #06080d;
   /* Primitives: ember */
   --ember-50: #fff3ec;
@@ -27,14 +29,17 @@
   --ember-700: #b33800;
   /* Primitives: status */
   --green-400: #4ade9a;
+  --green-500: #22c47e;
   --red-400: #ff6b70;
   --red-500: #ef4449;
   --amber-400: #fbc54f;
+  --amber-500: #f0a81c;
   --blue-400: #6fa0ff;
+  --blue-500: #4a7ff0;
   --violet-400: #a88bfa;
 
   /* Semantic: backgrounds */
-  --bg-canvas: var(--slate-1000);
+  --bg-canvas: var(--slate-975);
   --bg-app: var(--slate-950);
   --bg-surface: var(--slate-925);
   --bg-raised: var(--slate-900);
@@ -46,11 +51,12 @@
   --text-primary: var(--slate-100);
   --text-secondary: var(--slate-300);
   --text-tertiary: var(--slate-400);
+  --text-quaternary: var(--slate-450);
   --text-disabled: var(--slate-600);
   --text-accent: var(--ember-300);
   --text-on-accent: var(--slate-1000);
   /* Semantic: borders */
-  --border-subtle: rgb(255 255 255 / 0.06);
+  --border-subtle: rgb(255 255 255 / 0.08);
   --border-default: rgb(255 255 255 / 0.1);
   --border-strong: rgb(255 255 255 / 0.16);
   --border-accent: var(--ember-500);
@@ -62,13 +68,13 @@
   --accent-muted: rgb(255 94 20 / 0.24);
   /* Semantic: status */
   --status-success: var(--green-400);
-  --status-success-subtle: rgb(74 222 154 / 0.12);
+  --status-success-subtle: rgb(34 196 126 / 0.12);
   --status-danger: var(--red-400);
-  --status-danger-subtle: rgb(255 107 112 / 0.12);
+  --status-danger-subtle: rgb(239 68 73 / 0.12);
   --status-warning: var(--amber-400);
-  --status-warning-subtle: rgb(251 197 79 / 0.12);
+  --status-warning-subtle: rgb(240 168 28 / 0.12);
   --status-info: var(--blue-400);
-  --status-info-subtle: rgb(111 160 255 / 0.12);
+  --status-info-subtle: rgb(74 127 240 / 0.12);
   --status-idle: var(--slate-500);
 
   /* Spacing (4px grid) */
@@ -108,12 +114,17 @@
   --sheen: linear-gradient(180deg, rgb(255 255 255 / 0.025) 0%, rgb(255 255 255 / 0) 60%);
   --highlight: inset 0 1px 0 rgb(255 255 255 / 0.04);
   --shadow-overlay: 0 16px 48px rgb(0 0 0 / 0.5), 0 2px 8px rgb(0 0 0 / 0.4);
-  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--accent);
+  --focus-ring: 0 0 0 2px var(--bg-app), 0 0 0 4px rgb(255 94 20 / 0.75);
+  /* Inset variant for rows and tabs that sit inside overflow-clipped containers */
+  --focus-ring-inset: inset 0 0 0 2px rgb(255 94 20 / 0.75);
 
   /* Motion */
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
-  --dur-fast: 120ms;
-  --dur-base: 180ms;
+  --ease-press: cubic-bezier(0.3, 0, 0.2, 1);
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --enter-distance: 4px;
+  --press-scale: 0.99;
 
   color-scheme: dark;
 }
@@ -122,5 +133,7 @@
   :root {
     --dur-fast: 0ms;
     --dur-base: 0ms;
+    --enter-distance: 0px;
+    --press-scale: 1;
   }
 }

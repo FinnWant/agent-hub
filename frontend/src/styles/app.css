@@ -47,6 +47,34 @@ textarea {
   box-shadow: var(--focus-ring);
 }
 
+/* Rows and tabs live inside overflow-clipped containers, so their ring is drawn inside. */
+.tab:focus-visible,
+.tree-row:focus-visible,
+.run-item:focus-visible,
+a.row:focus-visible {
+  box-shadow: var(--focus-ring-inset);
+}
+
+/* Fixed-width digits wherever numbers update in place or line up in columns. */
+.mono,
+.badge,
+.legend,
+.meter-label,
+.meter-value,
+.row-meta,
+.nav-item .count,
+.capacity-line,
+.detail-meta,
+.run-meta,
+.run-item-meta,
+.tree-size,
+.audit-table,
+.code-gutter,
+.kiln-diff .diff-gutter,
+.changes-summary {
+  font-variant-numeric: tabular-nums;
+}
+
 .mono {
   font-family: var(--font-mono);
   font-feature-settings: "zero" 1;
@@ -110,7 +138,11 @@ textarea {
   color: var(--text-secondary);
   text-decoration: none;
   font-weight: 500;
-  transition: background var(--dur-fast), color var(--dur-fast);
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.nav-item:active {
+  background: var(--bg-active);
 }
 
 .nav-item:hover {
@@ -222,7 +254,8 @@ textarea {
   white-space: nowrap;
   cursor: pointer;
   text-decoration: none;
-  transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), transform var(--dur-fast);
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-press);
 }
 
 .btn:hover {
@@ -230,8 +263,8 @@ textarea {
   background: var(--sheen), var(--bg-overlay);
 }
 
-.btn:active {
-  transform: translateY(0.5px);
+.btn:active:not(:disabled) {
+  transform: scale(var(--press-scale));
 }
 
 .btn:disabled {
@@ -563,7 +596,11 @@ textarea {
   min-height: 56px;
   padding: var(--space-2) var(--space-4);
   text-decoration: none;
-  transition: background var(--dur-fast);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+a.row:active {
+  background: var(--bg-active);
 }
 
 .row + .row {
@@ -620,6 +657,7 @@ a.row:hover {
   margin: 0;
   font-size: var(--text-lg);
   font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
 .empty p {
@@ -675,7 +713,7 @@ a.row:hover {
   border: 1px solid var(--border-default);
   background: var(--bg-inset);
   box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.3);
-  transition: border-color var(--dur-fast);
+  transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
   width: 100%;
 }
 
@@ -718,10 +756,17 @@ a.row:hover {
   text-align: left;
   cursor: pointer;
   color: var(--text-secondary);
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-press);
 }
 
 .segmented button:hover:not(:disabled) {
   color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.segmented button:active:not(:disabled) {
+  transform: scale(var(--press-scale));
 }
 
 .segmented button[aria-checked="true"] {
@@ -783,13 +828,14 @@ a.row:hover {
 }
 
 .dialog-head {
-  padding: var(--space-5) var(--space-6) 0;
+  padding: var(--space-5) var(--space-5) 0;
 }
 
 .dialog-head h2 {
   margin: 0;
   font-size: var(--text-lg);
   font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
 .dialog-head p {
@@ -801,7 +847,7 @@ a.row:hover {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  padding: var(--space-5) var(--space-6);
+  padding: var(--space-4) var(--space-5);
 }
 
 .dialog-foot {
@@ -809,7 +855,7 @@ a.row:hover {
   justify-content: flex-end;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-4) var(--space-6);
+  padding: var(--space-4) var(--space-5);
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -828,7 +874,7 @@ a.row:hover {
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(6px) scale(0.99);
+    transform: translateY(var(--enter-distance)) scale(0.99);
   }
 }
 
@@ -880,6 +926,7 @@ a.row:hover {
 
 .crumbs a {
   text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
 .crumbs a:hover {
@@ -897,7 +944,7 @@ a.row:hover {
   margin: 0;
   font-size: var(--text-xl);
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
 }
 
 .detail-head .actions {
@@ -937,6 +984,8 @@ a.row:hover {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
 }
 
 .tab:hover:not(:disabled) {
@@ -947,7 +996,7 @@ a.row:hover {
   color: var(--text-primary);
 }
 
-.tab[aria-selected="true"]::after {
+.tab::after {
   content: "";
   position: absolute;
   left: var(--space-2);
@@ -956,6 +1005,14 @@ a.row:hover {
   height: 2px;
   border-radius: 2px;
   background: var(--text-primary);
+  opacity: 0;
+  transform: scaleX(0.6);
+  transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+
+.tab[aria-selected="true"]::after {
+  opacity: 1;
+  transform: scaleX(1);
 }
 
 .tab:disabled {
@@ -1121,6 +1178,11 @@ a.row:hover {
   color: var(--status-danger);
 }
 
+.audit-table .fail svg {
+  margin-left: var(--space-1);
+  vertical-align: -1px;
+}
+
 .audit-table .detail {
   font-family: var(--font-mono);
   color: var(--text-tertiary);
@@ -1154,14 +1216,12 @@ a.row:hover {
   place-items: center;
   min-height: 100%;
   padding: var(--space-4);
-  background:
-    radial-gradient(600px 300px at 50% -10%, rgb(255 94 20 / 0.08), transparent 70%),
-    var(--bg-canvas);
+  background: var(--bg-canvas);
 }
 
 .login-card {
   width: min(360px, 100%);
-  padding: var(--space-8) var(--space-6) var(--space-6);
+  padding: var(--space-6);
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
@@ -1389,10 +1449,15 @@ a.row:hover {
   background: none;
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 }
 
 .run-item:hover {
   background: var(--bg-hover);
+}
+
+.run-item:active {
+  background: var(--bg-active);
 }
 
 .run-item[aria-selected="true"] {
@@ -1564,6 +1629,7 @@ a.row:hover {
   font-size: var(--text-xs);
   color: var(--text-secondary);
   cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
 .ev-more:hover {
@@ -1620,6 +1686,18 @@ a.row:hover {
   left: 50%;
   transform: translateX(-50%);
   box-shadow: var(--shadow-overlay);
+  animation: rise-centered var(--dur-base) var(--ease-out);
+}
+
+.jump:active:not(:disabled) {
+  transform: translateX(-50%) scale(var(--press-scale));
+}
+
+@keyframes rise-centered {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(var(--enter-distance));
+  }
 }
 
 /* Toggle (Kiln) */
@@ -1646,7 +1724,15 @@ a.row:hover {
   border: 1px solid var(--border-default);
   background: var(--bg-inset);
   cursor: pointer;
-  transition: background var(--dur-fast), border-color var(--dur-fast);
+  transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+}
+
+.toggle:active:not(:disabled)::after {
+  width: 17px;
+}
+
+.toggle[aria-checked="true"]:active:not(:disabled)::after {
+  transform: translateX(13px);
 }
 
 .toggle::after {
@@ -1658,7 +1744,7 @@ a.row:hover {
   height: 14px;
   border-radius: 50%;
   background: var(--slate-300);
-  transition: transform var(--dur-base) var(--ease-out), background var(--dur-fast);
+  transition: transform var(--dur-base) var(--ease-out), width var(--dur-fast) var(--ease-press), background-color var(--dur-fast) var(--ease-out);
 }
 
 .toggle[aria-checked="true"] {
@@ -1765,6 +1851,11 @@ a.row:hover {
   color: var(--text-secondary);
   text-align: left;
   cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.tree-row:active {
+  background: var(--bg-active);
 }
 
 .tree-row:hover {
@@ -1778,9 +1869,18 @@ a.row:hover {
 }
 
 .tree-caret {
-  width: 10px;
+  display: inline-flex;
+  width: 12px;
+  flex: none;
   color: var(--text-tertiary);
-  font-size: 10px;
+}
+
+.tree-caret svg {
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.tree-row[aria-expanded="true"] .tree-caret svg {
+  transform: rotate(90deg);
 }
 
 .tree-caret.hidden {

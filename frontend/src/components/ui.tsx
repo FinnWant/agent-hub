@@ -140,6 +140,8 @@ const paths = {
   bell: "M4 11.5V7a4 4 0 0 1 8 0v4.5l1 1H3zM6.5 13.5a1.5 1.5 0 0 0 3 0",
   external: "M9.5 3H13v3.5M13 3L7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5",
   broom: "M10.5 2.5L7 8M4 8.5h6l1 5H3zM6 11v2.5M8 11v2.5",
+  chevron: "M6 4l4 4-4 4",
+  arrowDown: "M8 3v10M4 9l4 4 4-4",
 };
 
 export function Icon({ name, size = 16 }: { name: keyof typeof paths; size?: number }) {

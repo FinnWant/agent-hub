@@ -76,7 +76,7 @@ export default function Files({ sb }: { sb: Sandbox }) {
           <button className="tree-row" style={{ paddingLeft: 12 + depth * 14 }} aria-selected={selected === p}
             aria-expanded={isDir ? open.has(p) : undefined}
             onClick={() => (isDir ? toggle(p) : view(p))}>
-            <span className={`tree-caret ${isDir ? "" : "hidden"}`}>{open.has(p) ? "▾" : "▸"}</span>
+            <span className={`tree-caret ${isDir ? "" : "hidden"}`}><Icon name="chevron" size={12} /></span>
             <span className={`tree-name ${isDir ? "is-dir" : ""} ${e.type === "link" ? "is-link" : ""}`}>{e.name}</span>
             {!isDir && <span className="tree-size">{e.type === "link" ? "→" : bytes(e.size)}</span>}
           </button>

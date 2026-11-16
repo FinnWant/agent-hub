@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type AuditEntry } from "../lib/api";
 import { clock } from "../lib/format";
 import { useTitle } from "../lib/router";
+import { Icon } from "../components/ui";
 
 const FILTERS = ["all", "sandbox", "terminal", "auth"] as const;
 type Filter = (typeof FILTERS)[number];
@@ -92,7 +93,7 @@ export default function Audit() {
                   <td className="when">{clock(e.ts)}</td>
                   <td className={`action ${e.ok ? "" : "fail"}`}>
                     {e.action}
-                    {!e.ok && " ✕"}
+                    {!e.ok && <Icon name="clear" size={12} />}
                   </td>
                   <td className="mono">{e.target ? <a href={`/sandboxes/${e.target}`}>{e.target}</a> : <span className="muted">—</span>}</td>
                   <td className="detail">{summary(e)}</td>

@@ -317,7 +317,7 @@ function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => 
         {active && <div className="ev ev-pending"><span className="dot run-dot-running" /> working…</div>}
       </div>
       {!follow && (
-        <button className="btn btn-sm jump" onClick={() => setFollow(true)}>Jump to latest ↓</button>
+        <button className="btn btn-sm jump" onClick={() => setFollow(true)}>Jump to latest <Icon name="arrowDown" size={14} /></button>
       )}
     </div>
   );
