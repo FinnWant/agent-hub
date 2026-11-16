@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from . import config
 from .db import Sandbox
 from .templates import Template
-from .dockerio import ExecStream, attach_exec, tar_one, unix_socket_path, untar_one, untar_stream_to
+from .dockerio import ExecStream, attach_exec, tar_one, tar_tree, unix_socket_path, untar_one, untar_stream_to
 from .terminal import DockerTerminal, FakeTerminal, TerminalSession
 
 MANAGED_LABEL = "agent-hub.managed"
@@ -122,6 +122,7 @@ class Backend(Protocol):
              env: dict[str, str] | None = None) -> ExecResult: ...
     async def exec_stream(self, container_id: str, argv: list[str], env: dict[str, str]) -> Any: ...
     def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None: ...
+    def put_tree(self, container_id: str, entries: list[tuple[str, bytes | None, int]]) -> None: ...
     def memory_usage(self, container_id: str) -> int | None: ...
     def exit_info(self, container_id: str) -> dict[str, Any]: ...
     def prune(self, keep_sandbox_ids: set[str], current_images: set[str]) -> dict[str, Any]: ...
@@ -299,6 +300,12 @@ class DockerBackend:
     def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None:
         if not self._running(container_id).put_archive(directory, tar_one(name, data)):
             raise BackendError(f"Couldn't copy {name} into the sandbox")
+
+    def put_tree(self, container_id: str, entries: list[tuple[str, bytes | None, int]]) -> None:
+        """Root-owned directories and files at absolute paths (written by the daemon, so this
+        works although the sandbox has no capabilities; the sandbox user can't change them)."""
+        if not self._running(container_id).put_archive("/", tar_tree(entries)):
+            raise BackendError("Couldn't copy files into the sandbox")
 
     def get_file(self, container_id: str, path: str, max_size: int) -> bytes:
         c = self._running(container_id)
@@ -480,6 +487,7 @@ class FakeBackend:
         self.files: dict[tuple[str, str], bytes] = {}
         self.exec_calls: list[tuple[list[str] | str, dict[str, str] | None]] = []
         self.exec_replies: list[tuple[str, ExecResult]] = []  # (substring of the command, reply)
+        self.file_modes: dict[tuple[str, str], int] = {}       # put_tree: (container, path) -> mode
         self.stream_calls: list[tuple[list[str], dict[str, str]]] = []
         self.stream_script: list[tuple[float, int, bytes]] = []  # (delay, stream, data)
         self.stream_exit_code = 0
@@ -615,6 +623,13 @@ class FakeBackend:
     def put_file(self, container_id: str, directory: str, name: str, data: bytes) -> None:
         self._running(container_id)
         self.files[(container_id, f"{directory.rstrip('/')}/{name}")] = data
+
+    def put_tree(self, container_id: str, entries: list[tuple[str, bytes | None, int]]) -> None:
+        self._running(container_id)
+        for path, data, mode in entries:
+            if data is not None:
+                self.files[(container_id, "/" + path.strip("/"))] = data
+                self.file_modes[(container_id, "/" + path.strip("/"))] = mode
 
     def get_file(self, container_id: str, path: str, max_size: int) -> bytes:
         self._running(container_id)

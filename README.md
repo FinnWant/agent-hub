@@ -220,6 +220,16 @@ queued → running → succeeded | failed | cancelled | timed_out
    message; messages you send are written to it and the agent takes them in at its next step.
    When the agent has finished and has read every message, Kiln closes its input and it exits.
 
+   **Kiln's hooks.** Before each Claude Code run, Kiln copies root-owned files into the sandbox:
+   `/etc/claude-code/managed-settings.json` (Claude Code's managed settings, which user and
+   project settings can't override or disable), one hook command, `/usr/local/lib/kiln/kiln-hook`,
+   and a reply directory. A hook saves its input in the run directory and adds a marker line to
+   the agent's output, which Kiln already follows, so no network is involved. A hook that needs
+   a decision (allow, deny, block) waits for Kiln's reply, a root-owned file the agent can't
+   forge, and carries on without one after a time limit. Kiln uses this to mark context
+   compaction in the run log; checks, approvals and limits build on it. Hooks in your own
+   repositories keep working alongside Kiln's.
+
    **Claude gateway.** The agent never sees your Claude token. It gets a random per-run key and
    `ANTHROPIC_BASE_URL=http://kiln-gateway:8080`. `kiln-gateway` is a small, locked-down
    container (read-only, no capabilities, 128 MB) that holds the token; Kiln attaches it to

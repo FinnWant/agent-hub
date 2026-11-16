@@ -331,6 +331,50 @@ def test_real_claude_code_takes_a_message_mid_run(real):
         assert r.output.strip() == word, (name, r.output)
 
 
+def test_real_claude_code_obeys_kiln_hooks(real):
+    """With your Claude token (skipped if none): Claude Code loads the root-owned managed
+    settings Kiln installs, and a Kiln hook blocks a Bash command."""
+    import asyncio
+
+    from app import config
+    from app.hooks import HookReply
+    from app.runs import HookHandler
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    sb = _sandbox(svc, created, "run-hooks")
+    runs = _manager(svc)
+    asked: list[str] = []
+
+    async def guard(manager, run, call):
+        command = call.payload.get("tool_input", {}).get("command", "")
+        asked.append(command)
+        if "kiln-forbidden" in command:
+            return HookReply(code=2, stderr="Kiln policy: this command is not allowed here.")
+        return None
+
+    runs.hooks.append(HookHandler("PreToolUse", guard, wait=30, matcher="Bash"))
+    run = runs.create(sandbox_id=sb.id, prompt="Use the Bash tool to run exactly `echo kiln-forbidden > x.txt`. "
+                      "If that is blocked, do not try another way: create a file named blocked.txt containing "
+                      "exactly the word yes (with the Write tool) and stop.", runner="claude-code", timeout=300,
+                      max_turns=8, ip="t")
+    asyncio.run(runs._execute(run))
+    done = svc.db.get_run(run.id)
+    evs = svc.db.run_events(run.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    assert any("kiln-forbidden" in c for c in asked), asked
+    assert any(e.get("kind") == "tool_result" and "Kiln policy" in (e.get("text") or "") for e in evs), evs[-10:]
+    r = svc.exec(sb.id, f"git show {done.branch}:blocked.txt", 30, "t")
+    assert r.output.strip() == "yes", r.output  # may have no trailing newline
+    r = svc.exec(sb.id, f"git cat-file -e {done.branch}:x.txt 2>/dev/null && echo EXISTS; ls x.txt 2>/dev/null; true", 30, "t")
+    assert r.output.strip() == "", r.output  # the blocked command never ran
+    # The agent can read the hooks but not change them.
+    r = svc.exec(sb.id, "stat -c '%U %a' /etc/claude-code/managed-settings.json /usr/local/lib/kiln/kiln-hook; "
+                 "(echo x >> /etc/claude-code/managed-settings.json) 2>/dev/null && echo WRITABLE; true", 30, "t")
+    assert r.output.split() == ["root", "644", "root", "755"], r.output  # and no WRITABLE
+
+
 # ---------------------------------------------------------------------------
 # Files, diff, preview, stats, prune (phase 4)
 # ---------------------------------------------------------------------------

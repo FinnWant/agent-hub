@@ -92,6 +92,25 @@ def tar_one(name: str, data: bytes, uid: int = 1000, mode: int = 0o600) -> bytes
     return buf.getvalue()
 
 
+def tar_tree(entries: list[tuple[str, bytes | None, int]], uid: int = 0) -> bytes:
+    """An archive of directories (data None) and files, as (relative path, data, mode), all
+    owned by `uid` (default root, so the sandbox user can't change them). Directories should
+    come before their contents."""
+    buf = io.BytesIO()
+    now = int(time.time())
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for path, data, mode in entries:
+            info = tarfile.TarInfo(path.strip("/"))
+            info.mode, info.uid, info.gid, info.mtime = mode, uid, uid, now
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
 def untar_one(stream: bytes, max_size: int) -> bytes:
     with tarfile.open(fileobj=io.BytesIO(stream), mode="r") as tar:
         member = next((m for m in tar.getmembers() if m.isfile()), None)

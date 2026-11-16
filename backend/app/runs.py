@@ -24,7 +24,11 @@ from typing import Any
 from . import config
 from .db import ACTIVE_RUN_STATES, Database, Run
 from .redact import Redactor
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+
 from .docker_backend import BackendError
+from .hooks import HookCall, HookReply
 from .runners import MAX_MESSAGE, AgentRunner, RunError, RunProcess, RunSpec
 from .templates import TEMPLATES
 from .sandboxes import CapacityError, InvalidTransition, NotFound, SandboxError, SandboxService
@@ -33,6 +37,27 @@ from .workspace import Workspace, WorkspaceError
 log = logging.getLogger(__name__)
 
 FINAL_STATES = ("succeeded", "failed", "cancelled", "timed_out")
+
+
+@dataclass
+class HookHandler:
+    """Reacts to a Claude Code hook (see hooks.py). `wait` > 0: the hook waits up to that many
+    seconds for the handlers' reply (a deny / exit 2 from any handler wins); 0: fire and forget.
+    `fn(manager, run, call)` gets the hook's input in `call.payload`."""
+
+    event: str
+    fn: Callable[[RunManager, Run, HookCall], Awaitable[HookReply | None]]
+    wait: int = 0
+    matcher: str | None = None
+
+
+async def mark_compaction(manager: RunManager, run: Run, call: HookCall) -> None:
+    trigger = call.payload.get("trigger")
+    how = "automatically, its context was full" if trigger == "auto" else "on request"
+    manager._sys(run, f"The agent's context is being compacted ({how}); it continues from a summary")
+
+
+DEFAULT_HOOKS = [HookHandler("PreCompact", mark_compaction)]
 
 
 class RunManager:
@@ -49,6 +74,8 @@ class RunManager:
         self._cancel_reason: dict[str, str] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._dropped: set[str] = set()
+        self._hook_tasks: set[asyncio.Task] = set()
+        self.hooks: list[HookHandler] = list(DEFAULT_HOOKS)
         self.on_finished = None  # callable(run, sandbox_name), e.g. Notifier.run_finished
 
     # ---- queries -------------------------------------------------------------
@@ -234,11 +261,47 @@ class RunManager:
 
     # ---- the run itself --------------------------------------------------------
 
-    @staticmethod
-    def _spec(run: Run, sb) -> RunSpec:
+    def _spec(self, run: Run, sb) -> RunSpec:
+        hooks: dict[str, int] = {}
+        matchers: dict[str, set[str | None]] = {}
+        for h in self.hooks:
+            hooks[h.event] = max(hooks.get(h.event, 0), h.wait)
+            matchers.setdefault(h.event, set()).add(h.matcher)
         return RunSpec(run_id=run.id, container_id=sb.container_id or "", prompt=run.prompt,
                        timeout=run.timeout, max_turns=run.max_turns, branch=run.branch or "",
-                       preview_port=TEMPLATES[sb.template].preview_port, sandbox_id=sb.id)
+                       preview_port=TEMPLATES[sb.template].preview_port, sandbox_id=sb.id, hooks=hooks,
+                       # one matcher only if every handler of the event agrees; else all calls
+                       hook_matchers={e: next(iter(m)) for e, m in matchers.items() if len(m) == 1 and None not in m})
+
+    # ---- hooks ---------------------------------------------------------------
+
+    def _on_hook(self, run: Run, proc: RunProcess, event: dict[str, Any]) -> None:
+        call = HookCall(event=event["event"], id=event["id"])
+        task = asyncio.create_task(self._handle_hook(run, proc, call))
+        self._hook_tasks.add(task)  # handled alongside the log: a waiting handler holds nothing up
+        task.add_done_callback(self._hook_tasks.discard)
+
+    async def _handle_hook(self, run: Run, proc: RunProcess, call: HookCall) -> None:
+        handlers = [h for h in self.hooks if h.event == call.event]
+        waits = any(h.wait > 0 for h in handlers)
+        replies: list[HookReply] = []
+        try:
+            if handlers and hasattr(proc, "hook_payload"):
+                call.payload = await proc.hook_payload(call.id)
+            for h in handlers:
+                try:
+                    if (r := await h.fn(self, run, call)) is not None:
+                        replies.append(r)
+                except Exception:  # noqa: BLE001  (one handler never breaks the run)
+                    log.exception("hook handler for %s failed in run %s", call.event, run.id)
+            if waits and hasattr(proc, "reply_hook"):
+                blocking = [r for r in replies if r.code == 2]
+                denied = [r for r in replies if (r.stdout or {}).get("hookSpecificOutput", {})
+                          .get("permissionDecision") == "deny"]
+                reply = (blocking or denied or replies or [HookReply()])[0]
+                await proc.reply_hook(call.id, reply)
+        except Exception:  # noqa: BLE001  (e.g. the sandbox stopped meanwhile)
+            log.warning("couldn't handle the %s hook of run %s", call.event, run.id, exc_info=True)
 
     def _progress(self, run: Run, proc: RunProcess) -> dict[str, Any] | None:
         state = proc.state() if hasattr(proc, "state") else None
@@ -284,6 +347,11 @@ class RunManager:
                 async with asyncio.timeout(limit):
                     async for event in proc.events():
                         progress = event.pop("_progress", False)
+                        if event.get("type") == "hook":
+                            self._on_hook(run, proc, event)
+                            if progress:
+                                self.db.add_run_event(run.id, 0, 0, None, self._progress(run, proc))
+                            continue
                         self.emit(run, event, self._progress(run, proc) if progress else None)
             except TimeoutError:
                 self._cancel_reason.setdefault(run.id, "timed_out")

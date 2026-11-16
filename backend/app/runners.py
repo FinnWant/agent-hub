@@ -48,6 +48,8 @@ class RunSpec:
     branch: str
     preview_port: int = 8000
     sandbox_id: str = ""
+    hooks: dict[str, int] = field(default_factory=dict)     # Claude Code hook event -> wait seconds
+    hook_matchers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -306,6 +308,27 @@ class DetachedProcess:
             await self._maybe_close()
             raise
 
+    async def hook_payload(self, hook_id: str) -> dict[str, Any]:
+        """The JSON a hook received (see hooks.py); {} if it's gone or isn't JSON."""
+        from .hooks import HOOK_ID, MAX_PAYLOAD
+
+        if not HOOK_ID.fullmatch(hook_id):
+            return {}
+        path = f"{run_dir(self.spec.run_id)}/hook-{hook_id}.json"
+        try:
+            data = await asyncio.to_thread(self.backend.get_file, self.spec.container_id, path, MAX_PAYLOAD)
+            payload = json.loads(data)
+        except (BackendError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    async def reply_hook(self, hook_id: str, reply: Any) -> None:
+        """Answer a hook that waits (root-owned file: the agent can't write one itself)."""
+        from .hooks import reply_entries
+
+        await asyncio.to_thread(self.backend.put_tree, self.spec.container_id,
+                                reply_entries(self.spec.run_id, hook_id, reply))
+
     async def cancel(self) -> None:
         self._cancelled = True
         try:
@@ -442,12 +465,20 @@ class ClaudeCodeRunner(ExecRunner):
         return config.settings.claude_token_mode != "direct"
 
     async def start(self, spec: RunSpec) -> RunProcess:
+        await self.provision_hooks(spec)
         if self.via_gateway:
             self._keys[spec.run_id] = await asyncio.to_thread(self.gateway.issue, spec.sandbox_id, spec.run_id)
         try:
             return await super().start(spec)
         finally:
             self._keys.pop(spec.run_id, None)  # only needed for the launch environment
+
+    async def provision_hooks(self, spec: RunSpec) -> None:
+        """Install this run's hooks (always, so a previous run's hooks never linger)."""
+        from .hooks import provision_entries
+
+        entries = provision_entries(run_dir(spec.run_id), spec.run_id, spec.hooks, spec.hook_matchers)
+        await asyncio.to_thread(self.backend.put_tree, spec.container_id, entries)
 
     def initial_state(self, spec: RunSpec) -> dict[str, Any]:
         state: dict[str, Any] = {"sent": 1, "acked": 0}
@@ -520,6 +551,12 @@ class ClaudeCodeRunner(ExecRunner):
             return super().parse(stream_no, line, outcome)
         kind = msg.get("type")
         events: list[dict[str, Any]] = []
+        if kind == "kiln_hook":  # written by kiln-hook (hooks.py); handled by RunManager, not stored
+            from .hooks import parse_marker
+
+            if call := parse_marker(msg):
+                events.append({"type": "hook", "event": call.event, "id": call.id})
+            return events
         if kind == "system" and msg.get("subtype") == "init":
             outcome.extra["session_id"] = msg.get("session_id")
             if outcome.extra.get("init_seen"):  # once per run is enough, whatever the CLI does
