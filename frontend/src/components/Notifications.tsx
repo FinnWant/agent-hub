@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { NEEDS_YOU_EVENT } from "./Requests";
 import { api, hubEventsUrl, type HubEvent, type PushInfo } from "../lib/api";
 import { ago } from "../lib/format";
 import {
@@ -27,7 +28,10 @@ export function useHubEvents() {
       ws.onopen = () => (retry = 0);
       ws.onmessage = (e) => {
         for (const ev of (JSON.parse(e.data).events ?? []) as HubEvent[]) {
-          toastRef.current(ev.kind === "run.finished" || ev.kind === "test" ? "success" : "error", `${ev.title}: ${ev.body}`);
+          if (ev.kind === "run.needs_you") window.dispatchEvent(new Event(NEEDS_YOU_EVENT));
+          const tone = ev.kind === "run.finished" || ev.kind === "test" ? "success"
+            : ev.kind === "run.needs_you" || ev.kind === "run.budget" ? "info" : "error";
+          toastRef.current(tone, `${ev.title}: ${ev.body}`);
           nativeNotify(ev.title, ev.body);
         }
       };

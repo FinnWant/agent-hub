@@ -27,11 +27,13 @@ export type Route =
   | { name: "home" }
   | { name: "sandbox"; id: string }
   | { name: "audit" }
+  | { name: "needsYou" }
   | { name: "notFound" };
 
 export function match(path: string): Route {
   if (path === "/" || path === "/sandboxes") return { name: "home" };
   if (path === "/audit") return { name: "audit" };
+  if (path === "/needs-you") return { name: "needsYou" };
   const m = path.match(/^\/sandboxes\/([A-Za-z0-9]+)\/?$/);
   if (m) return { name: "sandbox", id: m[1] };
   return { name: "notFound" };

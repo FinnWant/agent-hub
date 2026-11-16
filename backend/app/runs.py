@@ -50,9 +50,14 @@ class HookHandler:
     wait: int = 0
     matcher: str | None = None
     applies: Callable[[Run], bool] | None = None  # None: every run; else installed only where True
+    matcher_for: Callable[[Run], str] | None = None  # a matcher that depends on the run
+    installed: bool = True  # False: not a Claude Code hook, but a Kiln command using the channel
 
     def for_run(self, run: Run) -> bool:
         return self.applies is None or bool(self.applies(run))
+
+    def matcher_of(self, run: Run) -> str | None:
+        return self.matcher_for(run) if self.matcher_for else self.matcher
 
 
 async def mark_compaction(manager: RunManager, run: Run, call: HookCall) -> None:
@@ -79,9 +84,10 @@ def outcome(run: Run) -> str:
 
 
 def default_hooks() -> list[HookHandler]:
+    from .owner import owner_hooks
     from .verify import stop_handler
 
-    return [HookHandler("PreCompact", mark_compaction), stop_handler()]
+    return [HookHandler("PreCompact", mark_compaction), stop_handler(), *owner_hooks()]
 
 
 class RunManager:
@@ -102,6 +108,12 @@ class RunManager:
         self.hooks: list[HookHandler] = default_hooks()
         self.verify_attempts: dict[str, int] = {}  # run id -> times sent back by failing checks
         self.verify_gave_up: set[str] = set()
+        from .owner import Owner
+
+        self.owner = Owner(self)
+        self._timeouts: dict[str, asyncio.Timeout] = {}
+        self._paused: dict[str, tuple[int, float]] = {}  # run id -> (open owner requests, since)
+        self._budget_warned: set[str] = set()
         self.on_finished = None  # callable(run, sandbox_name), e.g. Notifier.run_finished
 
     # ---- queries -------------------------------------------------------------
@@ -199,7 +211,8 @@ class RunManager:
             run = Run(id=rid, sandbox_id=sandbox_id, runner=runner, prompt=prompt,
                       timeout=min(timeout or s.run_timeout_default, s.run_timeout_max),
                       max_turns=min(max_turns or s.run_max_turns_default, s.run_max_turns_max),
-                      branch=f"agent/{rid}", verify_cmd=sb.verify_cmd or None, parent_run_id=continue_from)
+                      branch=f"agent/{rid}", verify_cmd=sb.verify_cmd or None, parent_run_id=continue_from,
+                      budget_usd=sb.budget_usd or None, approval_rules=sb.approval_rules or None)
             self.db.insert_run(run)
         self.db.audit(ip, "run.start", sandbox_id, detail={"run": rid, "runner": runner, "prompt": prompt[:200],
                                                            **({"continues": continue_from} if continue_from else {})})
@@ -303,15 +316,107 @@ class RunManager:
         hooks: dict[str, int] = {}
         matchers: dict[str, set[str | None]] = {}
         for h in self.hooks:
-            if not h.for_run(run):
+            if not h.installed or not h.for_run(run):
                 continue
             hooks[h.event] = max(hooks.get(h.event, 0), h.wait)
-            matchers.setdefault(h.event, set()).add(h.matcher)
+            matchers.setdefault(h.event, set()).add(h.matcher_of(run))
         return RunSpec(run_id=run.id, container_id=sb.container_id or "", prompt=run.prompt,
                        timeout=run.timeout, max_turns=run.max_turns, branch=run.branch or "",
                        preview_port=TEMPLATES[sb.template].preview_port, sandbox_id=sb.id, hooks=hooks,
                        # one matcher only if every handler of the event agrees; else all calls
                        hook_matchers={e: next(iter(m)) for e, m in matchers.items() if len(m) == 1 and None not in m})
+
+    # ---- waiting on the owner -------------------------------------------------
+
+    def pause_clock(self, run: Run, delta: int) -> None:
+        """Owner requests open (+1) and close (-1). While any is open the run's time limit stops."""
+        count, since = self._paused.get(run.id, (0, 0.0))
+        now = time.monotonic()
+        if count == 0 and delta > 0:
+            since = now
+        count = max(0, count + delta)
+        if count == 0 and delta < 0 and since:
+            waited = now - since
+            fresh = self.db.get_run(run.id)
+            total = (fresh.paused_seconds if fresh else 0) + waited
+            self.db.update_run(run, paused_seconds=total)
+            if clock := self._timeouts.get(run.id):
+                if (when := clock.when()) is not None:
+                    clock.reschedule(when + waited)
+            since = 0.0
+        self._paused[run.id] = (count, since)
+
+    # ---- usage and budget -----------------------------------------------------
+
+    def _gateway_for(self, run: Run, proc: RunProcess | None):
+        gw = getattr(self.runners.get(run.runner), "gateway", None)
+        state = proc.state() if proc is not None and hasattr(proc, "state") else {}
+        digest = state.get("key_digest")
+        if gw is None or not digest or not getattr(self.runners.get(run.runner), "via_gateway", False):
+            return None, None
+        return gw, digest
+
+    async def _meter_loop(self, run: Run, proc: RunProcess) -> None:
+        while True:
+            await asyncio.sleep(config.settings.meter_interval)
+            await self._meter_once(run, proc)
+
+    async def _meter_once(self, run: Run, proc: RunProcess | None) -> None:
+        from .usage import RunUsage
+
+        gw, digest = self._gateway_for(run, proc)
+        if gw is None:
+            return
+        fresh = self.db.get_run(run.id)
+        u = RunUsage.load(fresh.usage if fresh else None)
+        try:
+            records, u.offset = await asyncio.to_thread(gw.read_usage, digest, u.offset)
+        except Exception:  # noqa: BLE001  (the gateway may be restarting)
+            log.warning("couldn't read the usage of run %s", run.id, exc_info=True)
+            return
+        if not records:
+            return
+        for rec in records:
+            u.add(rec)
+        self.db.update_run(run, usage=u.dump(), cost_est=round(u.cost, 4))
+        await self._check_budget(run, u.cost, gw, digest)
+
+    async def _check_budget(self, run: Run, cost: float, gw, digest: str) -> None:
+        fresh = self.db.get_run(run.id)
+        budget = fresh.budget_usd if fresh else None
+        if not budget or fresh is None or not fresh.active:
+            return
+        if cost >= 0.8 * budget and run.id not in self._budget_warned and self.owner.notify:
+            self._budget_warned.add(run.id)
+            sb = self.sandboxes.get(run.sandbox_id)
+            self._sys(run, f"The run has used about ${cost:.2f} of its ${budget:.2f} budget")
+            self.owner.notify({"kind": "run.budget", "title": f"{sb.name}: run at 80% of its budget",
+                               "body": f"About ${cost:.2f} of ${budget:.2f}", "sandbox": run.sandbox_id,
+                               "run": run.id, "url": f"/sandboxes/{run.sandbox_id}"})
+        open_budget = [r for r in self.db.list_requests(state="pending", run_id=run.id) if r["kind"] == "budget"]
+        if cost >= budget and not open_budget:
+            await asyncio.to_thread(gw.hold, digest, True)
+            self._sys(run, f"Over its ${budget:.2f} budget (about ${cost:.2f} used): the agent is paused")
+            self.owner.create(run, "budget", f"Over its ${budget:.2f} budget",
+                              f"The run has used about ${cost:.2f} (estimated at API prices) of its ${budget:.2f} "
+                              "budget. Its API calls are on hold. Extend the budget to let it carry on, or stop it.",
+                              ["Extend", "Stop"], config.settings.budget_wait, data={"spent": round(cost, 4),
+                                                                                       "budget": budget})
+
+    async def budget_decided(self, run_id: str, ans: dict[str, Any] | None) -> None:
+        run = self.db.get_run(run_id)
+        if run is None or not run.active:
+            return
+        gw, digest = self._gateway_for(run, self._procs.get(run_id))
+        if ans and ans.get("choice") == "extend":
+            self.db.update_run(run, budget_usd=(run.budget_usd or 0) + float(ans["amount"]))
+            self._budget_warned.discard(run_id)
+            if gw is not None:
+                await asyncio.to_thread(gw.hold, digest, False)
+            self._sys(run, f"Budget raised to ${run.budget_usd:.2f}; the agent carries on")
+            return
+        self._sys(run, "Stopped at its budget" + ("" if ans else " (no answer in time)"))
+        await self.cancel(run_id, "owner" if ans else "system", reason="cancelled")
 
     # ---- continuing a run ------------------------------------------------------
 
@@ -379,7 +484,9 @@ class RunManager:
             limit: float = run.timeout
         else:  # Kiln restarted while the agent ran: pick up where the stored events end
             self._seq[run.id] = self.db.last_run_seq(run.id) + 1
-            limit = max(1.0, run.timeout - (time.time() - (run.started_at or time.time())))
+            limit = max(1.0, run.timeout + (run.paused_seconds or 0) - (time.time() - (run.started_at or time.time())))
+        proc: RunProcess | None = None
+        meter: asyncio.Task | None = None
         try:
             if run.id in self._cancel_reason:
                 raise asyncio.CancelledError
@@ -412,8 +519,10 @@ class RunManager:
                 self.db.update_run(run, runner_state=json.dumps(self._progress(run, proc)))
             if run.id in self._cancel_reason:
                 await proc.cancel()
+            meter = asyncio.create_task(self._meter_loop(run, proc))
             try:
-                async with asyncio.timeout(limit):
+                async with asyncio.timeout(limit) as clock:
+                    self._timeouts[run.id] = clock
                     async for event in proc.events():
                         progress = event.pop("_progress", False)
                         if event.get("type") == "hook":
@@ -446,7 +555,14 @@ class RunManager:
             log.exception("run %s crashed", run.id)
             error = f"Internal error: {e}"
         finally:
+            self._timeouts.pop(run.id, None)
+            if meter is not None:
+                meter.cancel()
+                await self._meter_once(run, proc)  # the last calls, before the key goes
             self._procs.pop(run.id, None)
+            self.owner.close_for_run(run.id)
+            self._paused.pop(run.id, None)
+            self._budget_warned.discard(run.id)
             release = getattr(self.runners.get(run.runner), "release", None)
             if release:
                 try:

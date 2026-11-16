@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Keyboar
 import { api, ApiError, runEventsUrl, type Run, type RunEvent, type RunState, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago } from "../lib/format";
 import { Icon, Kbd, useToast } from "./ui";
+import { RequestCard, usePendingRequests } from "./Requests";
 
 const MAX_EVENTS = 5000; // cap the in-browser buffer
 const ACTIVE: RunState[] = ["queued", "running"];
@@ -282,6 +283,14 @@ function RunView({ initial, onChange, onContinue }: {
   }, [initial.id, onChange]);
 
   const { events, conn } = useRunEvents(initial.id, refresh);
+  const { items: openRequests, reload: reloadRequests } = usePendingRequests(initial.id, active);
+
+  // Usage, budget and paused time change without log events: re-read the run while it's live.
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => document.visibilityState === "visible" && refresh(), 4000);
+    return () => clearInterval(t);
+  }, [active, refresh]);
 
   useEffect(() => {
     if (!active) return;
@@ -348,7 +357,16 @@ function RunView({ initial, onChange, onContinue }: {
           <RunBadge state={run.state} />
           {run.verify && <CheckBadge passed={run.verify === "passed"} rounds={run.verify_attempts} />}
           <span className="mono muted">{duration(run, now)}</span>
-          {costUsd != null && <span className="mono muted" title="Estimated by Claude Code">${costUsd.toFixed(3)}</span>}
+          {run.usage ? (
+            <span className="mono muted" title={usageTitle(run)}>
+              ≈${run.usage.cost.toFixed(2)}{run.budget_usd ? ` of $${run.budget_usd.toFixed(2)}` : ""}
+            </span>
+          ) : costUsd != null && <span className="mono muted" title="Estimated by Claude Code">${costUsd.toFixed(3)}</span>}
+          {run.usage && run.usage.context > 0 && (
+            <span className="mono muted" title={`Prompt size of the last ${run.usage.model} call`}>
+              {Math.round(run.usage.context / 1000)}k context
+            </span>
+          )}
           {turnsUsed != null && <span className="mono muted">{turnsUsed}/{run.max_turns} turns</span>}
           <span className="spacer" />
           {conn !== "live" && active && <span className="muted" style={{ fontSize: 12 }}>reconnecting…</span>}
@@ -375,6 +393,9 @@ function RunView({ initial, onChange, onContinue }: {
       </header>
       <div className="run-log" ref={logRef} onScroll={onScroll} aria-live="polite">
         {events.map((e) => <EventLine key={e.seq} e={e} />)}
+        {active && openRequests.map((r) => (
+          <div key={r.id} className="ev"><RequestCard req={r} onDone={() => { reloadRequests(); refresh(); }} /></div>
+        ))}
         {active && unread.map((text, i) => (
           <div key={`p${i}`} className="ev ev-user ev-user-pending">
             <span className="ev-user-label">You · not read yet</span>
@@ -410,6 +431,18 @@ function RunView({ initial, onChange, onContinue }: {
       )}
     </div>
   );
+}
+
+function usageTitle(run: Run): string {
+  const u = run.usage!;
+  const k = (n: number) => (n >= 10000 ? `${Math.round(n / 1000)}k` : String(n));
+  return [
+    `${u.requests} API calls, measured at the gateway`,
+    `${k(u.input)} input, ${k(u.cache_read)} cache read, ${k(u.cache_write)} cache write, ${k(u.output)} output tokens`,
+    "Cost estimated at API list prices (a subscription isn't billed per token)",
+    u.unpriced ? `${u.unpriced} calls to models without a known price aren't counted` : "",
+    run.paused_seconds > 1 ? `Waited ${Math.round(run.paused_seconds / 60)} min on you (not counted against the time limit)` : "",
+  ].filter(Boolean).join("\n");
 }
 
 function CheckBadge({ passed, rounds }: { passed: boolean; rounds: number }) {
@@ -462,6 +495,18 @@ function EventLine({ e }: { e: RunEvent }) {
       return <div className="ev ev-result">{e.text}</div>;
     case "check":
       return <CheckLine e={e} />;
+    case "request":
+      return (
+        <div className="ev ev-request">
+          <Icon name="inbox" size={14} />
+          <span>
+            <strong>{e.request_kind === "question" ? "Asked you" : e.request_kind === "budget" ? "Over budget" : "Wants your OK"}:</strong>{" "}
+            {e.title}
+          </span>
+        </div>
+      );
+    case "answer":
+      return <div className="ev ev-system">{e.text}</div>;
     case "user":
       return (
         <div className="ev ev-user">

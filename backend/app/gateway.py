@@ -10,6 +10,7 @@ sandbox (or a process left running after its run) stops working at the end of th
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import secrets
 import threading
@@ -25,7 +26,13 @@ log = logging.getLogger(__name__)
 GATEWAY_PORT = 8080
 GATEWAY_URL = f"http://{GATEWAY_NAME}:{GATEWAY_PORT}"
 KEYS_DIR = "/keys"
+USAGE_DIR = "/tmp/usage"   # gateway_proxy.py: <digest>.jsonl, one line per Messages API call
+MAX_USAGE_READ = 256 * 1024
 SOURCE = (Path(__file__).parent / "gateway_proxy.py").read_text()
+
+
+def _is_digest(d: str) -> bool:
+    return len(d) == 64 and all(c in "0123456789abcdef" for c in d)
 
 
 def key_digest(key: str) -> str:
@@ -103,26 +110,57 @@ class Gateway:
                 raise BackendError(f"Couldn't register the run with the Claude gateway: {r.output.strip()[-200:]}")
             self._keys[run_id] = digest
 
+    def read_usage(self, digest: str, offset: int) -> tuple[list[dict[str, Any]], int]:
+        """New usage records of a run's key since byte `offset`, and the offset after them."""
+        if not _is_digest(digest):
+            return [], offset
+        r = self.backend.gateway_exec(["sh", "-c", 'tail -c "+$1" "$0" 2>/dev/null | head -c "$2"; true',
+                                       f"{USAGE_DIR}/{digest}.jsonl", str(offset + 1), str(MAX_USAGE_READ)])
+        data = r.output.encode()
+        end = data.rfind(b"\n") + 1  # whole lines only
+        records = []
+        for line in data[:end].splitlines():
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                records.append(rec)
+        return records, offset + end
+
+    def hold(self, digest: str, on: bool) -> None:
+        """While held, the key's new requests wait in the gateway (see gateway_proxy.py)."""
+        if not _is_digest(digest):
+            return
+        if on:
+            self.backend.gateway_exec(["sh", "-c", 'touch "$0/$1"', KEYS_DIR, f"{digest}.hold"])
+        else:
+            self.backend.gateway_exec(["rm", "-f", f"{KEYS_DIR}/{digest}.hold"])
+
     def revoke(self, run_id: str) -> None:
         with self._lock:
             digest = self._keys.pop(run_id, None)
             if digest is None:
                 return
             try:
-                self.backend.gateway_exec(["rm", "-f", f"{KEYS_DIR}/{digest}"])
+                self.backend.gateway_exec(["rm", "-f", f"{KEYS_DIR}/{digest}", f"{KEYS_DIR}/{digest}.hold",
+                                           f"{USAGE_DIR}/{digest}.jsonl"])
             except Exception:  # noqa: BLE001  (a stopped gateway has no keys anyway)
                 log.warning("couldn't revoke the gateway key of run %s", run_id, exc_info=True)
 
     def revoke_all(self, keep: set[str] | frozenset[str] = frozenset()) -> None:
         """At startup: remove the keys of every run except those Kiln re-attaches to (`keep`:
         key digests)."""
-        keep = {d for d in keep if len(d) == 64 and all(c in "0123456789abcdef" for c in d)}
+        keep = {d for d in keep if _is_digest(d)}
         with self._lock:
             self._keys = {r: d for r, d in self._keys.items() if d in keep}
-            argv = ["find", KEYS_DIR, "-type", "f"]
-            for d in sorted(keep):
-                argv += ["!", "-name", d]
-            try:
-                self.backend.gateway_exec([*argv, "-delete"])
-            except Exception:  # noqa: BLE001
-                pass
+            # Kept runs keep their key, any hold (re-checked by Kiln) and their usage so far.
+            for root, names in ((KEYS_DIR, lambda d: (d, f"{d}.hold")), (USAGE_DIR, lambda d: (f"{d}.jsonl",))):
+                argv = ["find", root, "-type", "f"]
+                for d in sorted(keep):
+                    for name in names(d):
+                        argv += ["!", "-name", name]
+                try:
+                    self.backend.gateway_exec([*argv, "-delete"])
+                except Exception:  # noqa: BLE001
+                    pass

@@ -248,6 +248,19 @@ queued → running → succeeded | failed | cancelled | timed_out
    gets the output and keeps working, up to `VERIFY_MAX_REPAIRS` (3) rounds. After the run Kiln
    runs them once more and records *checks pass* or *checks fail* on the run. Checks prove
    what the project's tests prove, no more: the agent can edit tests too, so review the diff.
+   **Usage and budgets.** The gateway meters every Messages API call made with the run's key
+   (from the real responses, so the agent can't fake it): tokens, prompt size, and a cost
+   estimate at API list prices (a subscription isn't billed per token). With a budget per run
+   (Settings), you're notified at 80%; at 100% the gateway holds the agent's calls until you
+   **Extend** the budget or **Stop** the run (no answer in `BUDGET_WAIT`, 30 min: it stops).
+
+   **Needs you.** Things only you can decide, shown under *Needs you*, in the run log and as
+   notifications, while the run's time limit stops counting:
+   - *Approvals*: tool calls matching the sandbox's "Ask me before" rules (e.g. `rm -rf`,
+     `Edit: .github/workflows/`) wait for Allow or Deny; no answer in `APPROVAL_TIMEOUT`
+     (10 min) denies them. A guard rail for the agent's judgement, not a security boundary.
+   - *Questions*: the agent can run `kiln-ask "question" "option" …`; it waits `ASK_WAIT` (90 s),
+     and a later answer reaches the agent as a message.
 6. **Commit** everything the agent left on the branch (also after cancel or timeout, so the
    work can be reviewed).
 7. **Push** (only if enabled for the sandbox, the run succeeded, its checks didn't fail, and the repository is on

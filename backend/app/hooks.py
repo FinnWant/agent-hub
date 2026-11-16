@@ -61,6 +61,22 @@ exit 0
 """
 
 
+# kiln-ask "question" ["option" ...]: the agent asks the owner (owner.py). Same channel as the
+# hooks: the question (then a \x1e line, then one option per line) goes to Kiln as a "KilnAsk"
+# call, and the answer, or a "no answer yet" note, is printed.
+ASK_SCRIPT = r"""#!/bin/bash
+if [ $# -lt 1 ] || [ -z "$1" ]; then
+  echo 'usage: kiln-ask "question" ["option" ...]' >&2; exit 64
+fi
+if [ -z "$KILN_RUN_DIR" ] || [ -z "$KILN_REPLY_DIR" ]; then
+  echo "kiln-ask only works inside a Kiln agent run" >&2; exit 69
+fi
+q=$1; shift
+{ printf '%s\n\036\n' "$q"; for o in "$@"; do printf '%s\n' "$o"; done; } |
+  /usr/local/lib/kiln/kiln-hook "$KILN_RUN_DIR" "$KILN_REPLY_DIR" KilnAsk "${KILN_ASK_WAIT:-90}"
+"""
+
+
 @dataclass
 class HookReply:
     """What a waiting hook returns to Claude Code: exit code 0 with JSON on stdout (e.g. a
@@ -69,12 +85,13 @@ class HookReply:
     code: int = 0
     stdout: dict[str, Any] | None = None
     stderr: str = ""
+    text: str = ""  # plain output instead of JSON (what kiln-ask prints)
 
     def render(self) -> bytes:
         if self.code == 2:
             to, body = "err", self.stderr
         else:
-            to, body = "out", json.dumps(self.stdout) if self.stdout else ""
+            to, body = "out", json.dumps(self.stdout) if self.stdout else self.text
         body = body.replace("\r", "")[:MAX_REPLY]
         return f"{int(self.code)}\n{to}\n{body}\n#end\n".encode()
 
@@ -118,6 +135,7 @@ def provision_entries(run_dir: str, run_id: str, hooks: dict[str, int],
         ("etc/claude-code/managed-settings.json", settings, 0o644),
         ("usr/local/lib/kiln", None, 0o755),
         ("usr/local/lib/kiln/kiln-hook", HOOK_SCRIPT.encode(), 0o755),
+        ("usr/local/bin/kiln-ask", ASK_SCRIPT.encode(), 0o755),
         ("var/lib/kiln", None, 0o755),
         ("var/lib/kiln/replies", None, 0o755),
         (run_reply_dir(run_id).lstrip("/"), None, 0o755),

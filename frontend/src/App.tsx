@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Home from "./pages/Home";
 import SandboxDetail from "./pages/SandboxDetail";
 import Audit from "./pages/Audit";
+import { NeedsYou, usePendingRequests } from "./components/Requests";
 import NotificationsDialog, { useHubEvents } from "./components/Notifications";
 import { installExternalLinkHandler, registerServiceWorker } from "./lib/notifications";
 
@@ -15,6 +16,16 @@ installExternalLinkHandler();
 function HubEvents() {
   useHubEvents();
   return null;
+}
+
+function NeedsYouLink({ current }: { current: boolean }) {
+  const { items } = usePendingRequests();
+  return (
+    <a href="/needs-you" className="nav-item" aria-current={current ? "page" : undefined}>
+      <Icon name="inbox" /> Needs you
+      {items.length > 0 && <span className="count count-attention" aria-label={`${items.length} waiting`}>{items.length}</span>}
+    </a>
+  );
 }
 
 type AuthState = "checking" | "in" | "out" | "unconfigured";
@@ -62,6 +73,7 @@ export default function App() {
           <a href="/" className="nav-item" aria-current={route.name === "home" || route.name === "sandbox" ? "page" : undefined}>
             <Icon name="box" /> Sandboxes
           </a>
+          <NeedsYouLink current={route.name === "needsYou"} />
           <a href="/audit" className="nav-item" aria-current={route.name === "audit" ? "page" : undefined}>
             <Icon name="list" /> Audit log
           </a>
@@ -86,6 +98,7 @@ export default function App() {
           {route.name === "home" && <Home />}
           {route.name === "sandbox" && <SandboxDetail id={route.id} />}
           {route.name === "audit" && <Audit />}
+          {route.name === "needsYou" && <NeedsYou />}
           {route.name === "notFound" && (
             <div className="page">
               <div className="empty">

@@ -516,15 +516,28 @@ class FakeBackend:
         if self.gateway is None:
             raise BackendError("The Claude gateway isn't running")
         self.gateway_calls.append(list(argv))
-        keys = self.gateway["keys"]
-        if argv[:2] == ["sh", "-c"]:      # touch "$0/$1" KEYS_DIR digest
+        keys = self.gateway["keys"]                     # names of files in /keys
+        usage = self.gateway.setdefault("usage", {})    # digest -> bytes of /tmp/usage/<digest>.jsonl
+        out = ""
+        if argv[:2] == ["sh", "-c"] and "touch" in argv[2]:   # touch "$0/$1" KEYS_DIR name
             keys.add(argv[-1])
+        elif argv[:2] == ["sh", "-c"] and "tail -c" in argv[2]:  # usage from an offset
+            digest = argv[3].rsplit("/", 1)[-1].removesuffix(".jsonl")
+            out = usage.get(digest, b"")[int(argv[4]) - 1:][:int(argv[5])].decode()
         elif argv[:2] == ["rm", "-f"]:
-            keys.discard(argv[-1].rsplit("/", 1)[-1])
-        elif argv[0] == "find":           # find KEYS_DIR -type f [! -name keep]... -delete
+            for path in argv[2:]:
+                name = path.rsplit("/", 1)[-1]
+                keys.discard(name)
+                if path.startswith("/tmp/usage/"):
+                    usage.pop(name.removesuffix(".jsonl"), None)
+        elif argv[0] == "find":           # find DIR -type f [! -name keep]... -delete
             kept = {argv[i + 2] for i, a in enumerate(argv) if a == "!" and argv[i + 1] == "-name"}
-            keys.intersection_update(kept)
-        return ExecResult(exit_code=0, output="", truncated=False, timed_out=False)
+            if argv[1] == "/tmp/usage":
+                for d in [d for d in usage if f"{d}.jsonl" not in kept]:
+                    usage.pop(d)
+            else:
+                keys.intersection_update(kept)
+        return ExecResult(exit_code=0, output=out, truncated=False, timed_out=False)
 
     def get_file_to(self, container_id: str, path: str, dest: str, max_size: int) -> int:
         data = self.get_file(container_id, path, max_size)

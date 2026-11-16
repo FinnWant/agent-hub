@@ -322,9 +322,12 @@ class DetachedProcess:
         path = f"{run_dir(self.spec.run_id)}/hook-{hook_id}.json"
         try:
             data = await asyncio.to_thread(self.backend.get_file, self.spec.container_id, path, MAX_PAYLOAD)
-            payload = json.loads(data)
-        except (BackendError, ValueError):
+        except BackendError:
             return {}
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            return {"_text": data.decode("utf-8", "replace")}  # e.g. kiln-ask's question
         return payload if isinstance(payload, dict) else {}
 
     async def reply_hook(self, hook_id: str, reply: Any) -> None:
@@ -381,7 +384,8 @@ class ExecRunner:
         env = dict(self.env(spec))
         if self.interactive:
             env["AH_MSG"] = self.first_message(spec)
-        argv = launch_argv(spec.run_id, spec.timeout, self.argv(spec), self.interactive)
+        # The in-sandbox backstop allows for time the run spends waiting on its owner (owner.py).
+        argv = launch_argv(spec.run_id, spec.timeout + 4 * 3600, self.argv(spec), self.interactive)
         r = await asyncio.to_thread(self.backend.exec, spec.container_id, argv, 60, env)
         if r.exit_code != 0:
             raise BackendError(f"Couldn't start the agent: {r.output.strip()[-300:]}")
@@ -420,6 +424,9 @@ SYSTEM_PROMPT = (
     "and the owner reviews the diff. Nobody will answer questions during the run, so make reasonable "
     "decisions, keep changes focused on the request, and finish with a short summary of what you did. "
     "The owner may send you messages while you work; take them into account when they arrive. "
+    "If a decision really needs the owner, ask with the shell command "
+    "`kiln-ask \"question\" \"option A\" \"option B\"` (options are optional): it waits briefly for an "
+    "answer and otherwise tells you to carry on; a later answer arrives as a message. Ask rarely. "
     "If you start a web server for the owner to preview, it must listen on 0.0.0.0 port {preview_port} "
     "and keep running in the background."
 )
@@ -560,11 +567,20 @@ class ClaudeCodeRunner(ExecRunner):
 
     def env(self, spec: RunSpec) -> dict[str, str]:
         if not self.via_gateway:
-            return {"CLAUDE_CODE_OAUTH_TOKEN": config.settings.claude_code_oauth_token, "HOME": "/home/agent"}
+            return {"CLAUDE_CODE_OAUTH_TOKEN": config.settings.claude_code_oauth_token, "HOME": "/home/agent",
+                    **self.kiln_env(spec)}
         from .gateway import GATEWAY_URL
 
         return {"CLAUDE_CODE_OAUTH_TOKEN": self._keys[spec.run_id], "ANTHROPIC_BASE_URL": GATEWAY_URL,
-                "HOME": "/home/agent"}
+                "HOME": "/home/agent", **self.kiln_env(spec)}
+
+    @staticmethod
+    def kiln_env(spec: RunSpec) -> dict[str, str]:
+        """For kiln-ask (hooks.py)."""
+        from .hooks import run_reply_dir
+
+        return {"KILN_RUN_DIR": run_dir(spec.run_id), "KILN_REPLY_DIR": run_reply_dir(spec.run_id),
+                "KILN_ASK_WAIT": str(config.settings.ask_wait)}
 
     def parse(self, stream_no: int, line: str, outcome: Outcome) -> list[dict[str, Any]]:
         if stream_no == 2 or not line.startswith("{"):

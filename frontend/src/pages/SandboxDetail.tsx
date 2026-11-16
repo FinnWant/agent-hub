@@ -171,6 +171,7 @@ function Settings({ sb, system, onChanged, onDestroy }: {
           disabled={saving || (!canPush && !sb.allow_push)} onClick={togglePush} />
       </div>
       <ChecksSetting sb={sb} onChanged={onChanged} />
+      <OwnerSettings sb={sb} onChanged={onChanged} />
       <dl className="card kv">
         <dt>Template</dt><dd>{sb.template}</dd>
         <dt>Memory</dt><dd>{bytes(sb.memory)} (no swap)</dd>
@@ -233,6 +234,62 @@ function ChecksSetting({ sb, onChanged }: { sb: Sandbox; onChanged: () => void }
         <button className="btn" type="submit" disabled={saving || !changed}>
           {saving ? "Saving…" : "Save"}
         </button>
+      </div>
+    </form>
+  );
+}
+
+const RULES_HINT = "rm -rf\nBash: git push\nEdit: .github/workflows/\nWrite: .env";
+
+function OwnerSettings({ sb, onChanged }: { sb: Sandbox; onChanged: () => void }) {
+  const toast = useToast();
+  const [budget, setBudget] = useState(sb.budget_usd != null ? String(sb.budget_usd) : "");
+  const [rules, setRules] = useState(sb.approval_rules ?? "");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setBudget(sb.budget_usd != null ? String(sb.budget_usd) : ""), [sb.budget_usd]);
+  useEffect(() => setRules(sb.approval_rules ?? ""), [sb.approval_rules]);
+  const budgetNum = budget.trim() ? Number(budget) : 0;
+  const valid = Number.isFinite(budgetNum) && budgetNum >= 0;
+  const changed = budgetNum !== (sb.budget_usd ?? 0) || rules.trim() !== (sb.approval_rules ?? "");
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.updateSandbox(sb.id, { budget_usd: budgetNum, approval_rules: rules.trim() });
+      toast("success", "Saved; applies from the next run");
+      onChanged();
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form className="card checks-setting" onSubmit={(e) => { e.preventDefault(); save(); }}>
+      <div>
+        <label htmlFor="budget"><strong>Budget per run</strong></label>
+        <p>
+          Kiln measures every Claude call at its gateway and estimates the cost at API list prices (your
+          subscription isn't billed per token). At 80% you're notified; at 100% the agent is paused until you extend
+          the budget or stop the run (after 30 minutes without an answer it stops). Empty: no budget.
+        </p>
+      </div>
+      <div className="checks-row">
+        <span className="input-prefix">$</span>
+        <input id="budget" className="input mono" inputMode="decimal" placeholder="e.g. 5" value={budget}
+          aria-invalid={!valid} onChange={(e) => setBudget(e.target.value)} style={{ maxWidth: 140 }} />
+      </div>
+      <div>
+        <label htmlFor="rules"><strong>Ask me before</strong></label>
+        <p>
+          One rule per line. Shell commands containing the text, or <span className="mono">Edit:</span> /{" "}
+          <span className="mono">Write:</span> and part of a file path. The agent waits for your OK (10 minutes,
+          then it's denied). A guard rail for the agent's judgement, not a security boundary.
+        </p>
+      </div>
+      <textarea id="rules" className="input mono rules-input" rows={4} maxLength={5000} spellCheck={false}
+        placeholder={RULES_HINT} value={rules} onChange={(e) => setRules(e.target.value)} />
+      <div className="checks-row" style={{ justifyContent: "flex-end" }}>
+        <button className="btn" type="submit" disabled={saving || !changed || !valid}>{saving ? "Saving…" : "Save"}</button>
       </div>
     </form>
   );

@@ -22,6 +22,10 @@ export interface Sandbox {
   workspace_bytes: number | null;
   /** The project's checks, run by Kiln when the agent wants to stop and after each run. */
   verify_cmd: string | null;
+  /** Per run, estimated at API list prices; the agent is held when it's reached. */
+  budget_usd: number | null;
+  /** Tool calls that need the owner's OK, one rule per line (see owner.py). */
+  approval_rules: string | null;
   memory_usage: number | null;
   last_run?: { id: string; state: RunState; created_at: number; finished_at: number | null } | null;
 }
@@ -54,8 +58,45 @@ export interface Run {
   verify_attempts: number;
   /** The run this one continues (its branch and agent session). */
   parent_run_id: string | null;
+  budget_usd: number | null;
+  approval_rules: string | null;
+  /** Measured at the Claude gateway; cost is an estimate at API list prices. */
+  usage: RunUsage | null;
+  cost_est: number | null;
+  /** Seconds spent waiting on the owner (not counted against the time limit). */
+  paused_seconds: number;
   /** The agent is running and reads messages (see `api.sendRunMessage`). */
   can_message: boolean;
+}
+
+/** Something a run needs the owner to decide (approval, question, budget). */
+export interface OwnerRequest {
+  id: string;
+  run_id: string;
+  sandbox_id: string;
+  sandbox_name: string | null;
+  kind: "approval" | "question" | "budget";
+  state: "pending" | "answered" | "expired" | "closed";
+  title: string;
+  body: string;
+  options: string[];
+  answer: { choice: string | null; text: string | null; amount: number | null } | null;
+  created_at: number;
+  answered_at: number | null;
+  deadline: number | null;
+  data: { spent?: number; budget?: number; tool?: string; rule?: string };
+}
+
+export interface RunUsage {
+  requests: number;
+  input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  cost: number;
+  unpriced: number;
+  context: number;
+  model: string;
 }
 
 export type RunEvent = { seq: number; ts: number } & (
@@ -63,6 +104,9 @@ export type RunEvent = { seq: number; ts: number } & (
       text: string; name?: string; is_error?: boolean }
   | { type: "log"; kind: "check"; text: string; phase: "stop" | "final"; passed: boolean;
       exit_code: number | null; timed_out: boolean; seconds: number; attempt?: number }
+  | { type: "log"; kind: "request"; request: string; request_kind: OwnerRequest["kind"]; title: string;
+      text: string; options: string[] }
+  | { type: "log"; kind: "answer"; request: string; state: "answered" | "expired"; text: string }
   | { type: "status"; state: RunState }
   | { type: "cost"; cost_usd: number | null; turns: number | null; duration_ms: number | null }
   | { type: "done"; state: RunState; error: string | null; commit: string | null; branch: string; pushed: boolean }
@@ -123,7 +167,7 @@ export interface PushInfo {
 }
 
 export interface HubEvent {
-  kind: "run.finished" | "run.failed" | "sandbox.problem" | "test";
+  kind: "run.finished" | "run.failed" | "run.needs_you" | "run.budget" | "sandbox.problem" | "test";
   title: string;
   body: string;
   url?: string;
@@ -262,7 +306,8 @@ export const api = {
   start: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/start`),
   stop: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/stop`),
   destroy: (id: string) => request<void>("DELETE", `/sandboxes/${encodeURIComponent(id)}`),
-  updateSandbox: (id: string, body: { allow_push?: boolean; verify_cmd?: string }) =>
+  updateSandbox: (id: string, body: { allow_push?: boolean; verify_cmd?: string; budget_usd?: number;
+    approval_rules?: string }) =>
     request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
   runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),
   startRun: (sandboxId: string, body: { prompt: string; timeout_minutes?: number; max_turns?: number;
@@ -270,6 +315,11 @@ export const api = {
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),
+  requests: (params: { state?: OwnerRequest["state"]; run?: string; limit?: number } = {}) =>
+    request<OwnerRequest[]>("GET", `/requests?${new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]))}`),
+  answerRequest: (id: string, body: { choice?: string; text?: string; amount?: number }) =>
+    request<OwnerRequest>("POST", `/requests/${encodeURIComponent(id)}/answer`, body),
   sendRunMessage: (id: string, text: string) =>
     request<{ ok: boolean }>("POST", `/runs/${encodeURIComponent(id)}/messages`, { text }),
   files: (id: string, path: string) =>

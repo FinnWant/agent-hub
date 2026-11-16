@@ -216,7 +216,7 @@ def test_secrets_are_redacted_and_only_in_the_agent_env(admin, svc, runs, backen
     assert backend.gateway["spec"]["environment"]["KILN_UPSTREAM_TOKEN"] == TOKEN
     assert "kiln-sb-" + sb["id"] in backend.gateway["networks"]
     assert backend.gateway["keys"] == set()
-    added = [c for c in backend.gateway_calls if c[:2] == ["sh", "-c"]]
+    added = [c for c in backend.gateway_calls if c[:2] == ["sh", "-c"] and "touch" in c[2]]
     assert len(added) == 1 and added[0][-1] == gateway.key_digest(env["CLAUDE_CODE_OAUTH_TOKEN"])
 
 

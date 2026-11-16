@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI):
     notifier.bind_loop(asyncio.get_running_loop())
     svc.on_problem = notifier.sandbox_problem
     app.state.runs.on_finished = notifier.run_finished
+    app.state.runs.owner.notify = notifier.publish
     svc.reconcile_on_startup()
     # Agents still running in their sandboxes are followed again; their gateway keys stay valid.
     resumable = await asyncio.to_thread(app.state.runs.reconcile_on_startup)
@@ -65,6 +66,7 @@ async def lifespan(app: FastAPI):
     for runner in app.state.runs.runners.values():
         if gw := getattr(runner, "gateway", None):
             await asyncio.to_thread(gw.revoke_all, keep)
+    app.state.runs.owner.restore({run.id for run, _ in resumable})
     for run, state in resumable:
         log.info("re-attaching to run %s", run.id)
         app.state.runs.resume(run, state)
@@ -336,13 +338,16 @@ def get_sandbox(sandbox_id: str, _: Admin, svc: Svc, runs: Runs, mon: Mon) -> di
 class SandboxSettings(BaseModel):
     allow_push: bool | None = None
     verify_cmd: str | None = Field(default=None, max_length=1000)  # "" removes the checks
+    budget_usd: float | None = Field(default=None, ge=0, le=10_000)  # per run; 0 removes it
+    approval_rules: str | None = Field(default=None, max_length=5000)  # "" removes them
 
 
 @app.patch("/api/sandboxes/{sandbox_id}")
 def update_sandbox(sandbox_id: str, body: SandboxSettings, _: Admin, request: Request, svc: Svc,
                    runs: Runs) -> dict:
     sb = svc.update_settings(sandbox_id, auth.client_ip(request), allow_push=body.allow_push,
-                             verify_cmd=body.verify_cmd)
+                             verify_cmd=body.verify_cmd, budget_usd=body.budget_usd,
+                             approval_rules=body.approval_rules)
     return sandbox_out(sb, runs)
 
 
@@ -539,8 +544,11 @@ async def push_test(_: Admin, notifier: Notif) -> dict:
 # ---------------------------------------------------------------------------
 
 def run_out(run: Run) -> dict:
+    from .usage import RunUsage
+
     out = run.to_dict()
     out.pop("runner_state", None)  # internal (offsets, gateway key digest)
+    out["usage"] = RunUsage.load(run.usage).public() if run.usage else None
     runs = getattr(app.state, "runs", None)
     out["can_message"] = bool(runs and run.active and runs.can_send(run.id))
     return out
@@ -579,6 +587,43 @@ def get_run(run_id: str, _: Admin, runs: Runs) -> dict:
 def run_log(run_id: str, _: Admin, runs: Runs, after: int = Query(-1, ge=-1)) -> list[dict]:
     runs.get(run_id)
     return runs.db.run_events(run_id, after_seq=after, limit=5000)
+
+
+# ---------------------------------------------------------------------------
+# Owner requests (owner.py): approvals, questions, budgets
+# ---------------------------------------------------------------------------
+
+def request_out(row: dict, svc: SandboxService) -> dict:
+    from .owner import public
+
+    out = public(row)
+    sb = svc.db.get_sandbox(row["sandbox_id"])
+    out["sandbox_name"] = sb.name if sb else None
+    return out
+
+
+@app.get("/api/requests")
+def list_requests(_: Admin, svc: Svc, runs: Runs, state: Literal["pending", "answered", "expired", "closed"] | None = None,
+                  run: str | None = Query(None, pattern=r"^[0-9a-f]{12}$"), limit: int = Query(50, ge=1, le=200)) -> list[dict]:
+    return [request_out(r, svc) for r in runs.db.list_requests(state=state, run_id=run, limit=limit)]
+
+
+class Answer(BaseModel):
+    choice: str | None = Field(default=None, max_length=40)
+    text: str | None = Field(default=None, max_length=4000)
+    amount: float | None = Field(default=None, gt=0, le=10_000)
+
+
+@app.post("/api/requests/{req_id}/answer")
+async def answer_request(req_id: str, body: Answer, _: Admin, request: Request, svc: Svc, runs: Runs) -> dict:
+    try:
+        row = await runs.owner.answer(req_id, (body.choice or "").lower() or None, body.text, body.amount,
+                                      auth.client_ip(request))
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
+    return request_out(row, svc)
 
 
 class RunMessage(BaseModel):

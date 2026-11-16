@@ -130,6 +130,13 @@ class Settings:
     # agent is sent back to fix failing checks before it may stop anyway.
     verify_timeout: int = _int("VERIFY_TIMEOUT", 10 * 60)
     verify_max_repairs: int = _int("VERIFY_MAX_REPAIRS", 3)
+    # Owner requests (owner.py): how long an approval waits before it is denied, how long a run
+    # over its budget waits before it is stopped, how long `kiln-ask` waits before the agent
+    # carries on (a later answer arrives as a message), and how often usage is read.
+    approval_timeout: int = _int("APPROVAL_TIMEOUT", 10 * 60)
+    budget_wait: int = _int("BUDGET_WAIT", 30 * 60)
+    ask_wait: int = _int("ASK_WAIT", 90)
+    meter_interval: float = float(os.getenv("METER_INTERVAL", "3"))
     run_timeout_max: int = _int("RUN_TIMEOUT_MAX", 4 * 60 * 60)
     run_max_turns_default: int = _int("RUN_MAX_TURNS_DEFAULT", 50)
     run_max_turns_max: int = _int("RUN_MAX_TURNS_MAX", 500)

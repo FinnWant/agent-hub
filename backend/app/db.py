@@ -77,6 +77,25 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     failures    INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS requests (
+    id          TEXT PRIMARY KEY,
+    run_id      TEXT NOT NULL,
+    sandbox_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,          -- approval | question | budget
+    state       TEXT NOT NULL,          -- pending | answered | expired | closed
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    options     TEXT NOT NULL,          -- JSON list
+    answer      TEXT,                   -- JSON {"choice", "text", "amount"}
+    created_at  REAL NOT NULL,
+    answered_at REAL,
+    deadline    REAL,
+    hook_id     TEXT,
+    data        TEXT NOT NULL           -- JSON
+);
+CREATE INDEX IF NOT EXISTS requests_state ON requests(state, created_at);
+CREATE INDEX IF NOT EXISTS requests_run ON requests(run_id);
+
 CREATE TABLE IF NOT EXISTS run_events (
     run_id  TEXT NOT NULL,
     seq     INTEGER NOT NULL,
@@ -98,6 +117,13 @@ MIGRATIONS = [
     ("runs", "verify", "TEXT"),         # passed | failed | None (no checks, or not run)
     ("runs", "verify_attempts", "INTEGER NOT NULL DEFAULT 0"),  # times the agent was sent back
     ("runs", "parent_run_id", "TEXT"),  # the run this one continues (its branch and session)
+    ("sandboxes", "budget_usd", "REAL"),        # per run, estimated (usage.py)
+    ("sandboxes", "approval_rules", "TEXT"),    # see owner.py
+    ("runs", "budget_usd", "REAL"),
+    ("runs", "approval_rules", "TEXT"),
+    ("runs", "usage", "TEXT"),                  # JSON, usage.RunUsage
+    ("runs", "cost_est", "REAL"),
+    ("runs", "paused_seconds", "REAL NOT NULL DEFAULT 0"),  # waiting on the owner; not counted
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -123,6 +149,8 @@ class Sandbox:
     preview_port: int | None = None      # host port (Tailscale IP) published for previews
     workspace_bytes: int | None = None   # last measured size of /workspace
     verify_cmd: str | None = None        # the project's checks, e.g. "npm test" (see verify.py)
+    budget_usd: float | None = None      # per run, estimated at API prices (usage.py)
+    approval_rules: str | None = None    # actions that need the owner's OK (owner.py)
 
     def __post_init__(self) -> None:
         self.allow_push = bool(self.allow_push)
@@ -157,6 +185,11 @@ class Run:
     verify: str | None = None
     verify_attempts: int = 0
     parent_run_id: str | None = None
+    budget_usd: float | None = None
+    approval_rules: str | None = None
+    usage: str | None = None
+    cost_est: float | None = None
+    paused_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)
@@ -268,6 +301,37 @@ class Database:
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    # ---- owner requests ------------------------------------------------------
+
+    def insert_request(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(f"INSERT INTO requests ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                               tuple(row.values()))
+
+    def update_request(self, req_id: str, **changes: Any) -> None:
+        sets = ", ".join(f"{k} = ?" for k in changes)
+        with self._lock:
+            self._conn.execute(f"UPDATE requests SET {sets} WHERE id = ?", (*changes.values(), req_id))
+
+    def get_request(self, req_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM requests WHERE id = ?", (req_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_requests(self, state: str | None = None, run_id: str | None = None,
+                      limit: int = 100) -> list[dict[str, Any]]:
+        q, args = "SELECT * FROM requests WHERE 1=1", []
+        if state:
+            q += " AND state = ?"
+            args.append(state)
+        if run_id:
+            q += " AND run_id = ?"
+            args.append(run_id)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(limit)
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(q, args).fetchall()]
 
     def last_run_seq(self, run_id: str) -> int:
         with self._lock:

@@ -434,6 +434,46 @@ def test_real_claude_code_continues_a_run(real):
         assert r.output.strip() == word, (name, r.output)
 
 
+def test_real_claude_code_asks_the_owner_and_is_metered(real):
+    """With your Claude token (skipped if none): the agent uses kiln-ask, gets the owner's answer
+    and acts on it; the gateway meters the run's API calls from the real responses."""
+    import asyncio
+
+    from app import config
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    sb = _sandbox(svc, created, "run-ask")
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="Use the shell command kiln-ask to ask me which colour to use, with "
+                      "the options red and blue. Then create a file named colour.txt containing exactly the colour "
+                      "I chose.", runner="claude-code", timeout=300, max_turns=10, ip="t")
+
+    async def go():
+        task = runs.launch(run)
+        for _ in range(1200):
+            pending = svc.db.list_requests(state="pending", run_id=run.id)
+            if pending:
+                await runs.owner.answer(pending[0]["id"], "blue", "blue", None, "t")
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.wait_for(task, 300)
+
+    asyncio.run(go())
+    done = svc.db.get_run(run.id)
+    evs = svc.db.run_events(run.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    [req] = svc.db.list_requests(run_id=run.id)
+    assert req["kind"] == "question" and req["state"] == "answered", req
+    r = svc.exec(sb.id, f"git show {done.branch}:colour.txt", 30, "t")
+    assert r.output.strip() == "blue", r.output
+    from app.usage import RunUsage
+
+    u = RunUsage.load(done.usage)
+    assert u.requests > 0 and u.output > 0 and u.cost > 0 and u.model.startswith("claude-"), done.usage
+
+
 # ---------------------------------------------------------------------------
 # Files, diff, preview, stats, prune (phase 4)
 # ---------------------------------------------------------------------------
