@@ -179,3 +179,21 @@ def test_commit_message_is_bounded():
     r.prompt = "x" * 10_000
     msg = commit_message(r)
     assert len(msg.splitlines()[0]) <= 100 and len(msg) < 4300 and "Run-Id: 0123456789ab" in msg
+
+
+def test_continuing_branches_from_the_previous_run(env, origin):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    (b.ws / "a.txt").write_text("a")
+    w.finalize(sb, r1, lambda _: None)
+    r2 = run("bbbbbbbbbbbb")
+    r2.base_branch = w.prepare(sb, r2, lambda _: None, start_from=r1.branch)
+    assert r2.base_branch == "trunk"  # the diff and push still compare against the base branch
+    assert (b.ws / "a.txt").read_text() == "a"  # the previous run's work is there
+    assert git("rev-parse", "--abbrev-ref", "HEAD", cwd=b.ws).strip() == r2.branch
+    with pytest.raises(WorkspaceError, match="no longer exists"):
+        w.prepare(sb, run("cccccccccccc"), lambda _: None, start_from="agent/dddddddddddd")
+    with pytest.raises(WorkspaceError, match="Can't continue"):
+        w.prepare(sb, run("eeeeeeeeeeee"), lambda _: None, start_from="main; rm -rf /")

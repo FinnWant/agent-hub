@@ -52,6 +52,8 @@ export interface Run {
   verify: "passed" | "failed" | null;
   /** Times failing checks sent the agent back to work. */
   verify_attempts: number;
+  /** The run this one continues (its branch and agent session). */
+  parent_run_id: string | null;
   /** The agent is running and reads messages (see `api.sendRunMessage`). */
   can_message: boolean;
 }
@@ -263,7 +265,8 @@ export const api = {
   updateSandbox: (id: string, body: { allow_push?: boolean; verify_cmd?: string }) =>
     request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
   runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),
-  startRun: (sandboxId: string, body: { prompt: string; timeout_minutes?: number; max_turns?: number }) =>
+  startRun: (sandboxId: string, body: { prompt: string; timeout_minutes?: number; max_turns?: number;
+    continue_from?: string }) =>
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),

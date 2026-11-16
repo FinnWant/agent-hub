@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -31,6 +32,7 @@ MAX_LINE = 20_000         # characters kept from one output line
 MAX_TOOL_RESULT = 4_000   # characters of a tool result shown in the log
 MAX_MESSAGE = 4_000       # characters in one message sent to a running agent
 RUN_ROOT = "/tmp/kiln-runs"
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 RECONNECTS = 5            # follower restarts in a row without new output before giving up
 
 
@@ -50,6 +52,9 @@ class RunSpec:
     sandbox_id: str = ""
     hooks: dict[str, int] = field(default_factory=dict)     # Claude Code hook event -> wait seconds
     hook_matchers: dict[str, str] = field(default_factory=dict)
+    # Continuing a run: the agent's session to resume, and the prompt to use instead if it can't be
+    resume_session: str | None = None
+    fallback_prompt: str | None = None
 
 
 @dataclass
@@ -465,6 +470,9 @@ class ClaudeCodeRunner(ExecRunner):
         return config.settings.claude_token_mode != "direct"
 
     async def start(self, spec: RunSpec) -> RunProcess:
+        if spec.resume_session and not await asyncio.to_thread(self.session_exists, spec):
+            spec.resume_session = None  # e.g. the sandbox was recreated: the agent gets a summary
+            spec.prompt = spec.fallback_prompt or spec.prompt
         await self.provision_hooks(spec)
         if self.via_gateway:
             self._keys[spec.run_id] = await asyncio.to_thread(self.gateway.issue, spec.sandbox_id, spec.run_id)
@@ -480,8 +488,22 @@ class ClaudeCodeRunner(ExecRunner):
         entries = provision_entries(run_dir(spec.run_id), spec.run_id, spec.hooks, spec.hook_matchers)
         await asyncio.to_thread(self.backend.put_tree, spec.container_id, entries)
 
+    def session_exists(self, spec: RunSpec) -> bool:
+        """Claude Code keeps sessions in ~/.claude/projects/<dir>/<id>.jsonl in the sandbox."""
+        sid = spec.resume_session or ""
+        if not SESSION_ID.fullmatch(sid):
+            return False
+        try:
+            r = self.backend.exec(spec.container_id, ["sh", "-c",
+                                  'find /home/agent/.claude/projects -maxdepth 2 -name "$0.jsonl" | head -1', sid], 30)
+        except BackendError:
+            return False
+        return r.exit_code == 0 and r.output.strip().endswith(f"{sid}.jsonl")
+
     def initial_state(self, spec: RunSpec) -> dict[str, Any]:
         state: dict[str, Any] = {"sent": 1, "acked": 0}
+        if spec.resume_session:
+            state["resumed"] = spec.resume_session
         if digest := self.key_digest(spec.run_id):
             state["key_digest"] = digest  # to register the key again after a restart
         return state
@@ -532,6 +554,8 @@ class ClaudeCodeRunner(ExecRunner):
                 "--append-system-prompt", SYSTEM_PROMPT.format(branch=spec.branch, preview_port=spec.preview_port)]
         if config.settings.agent_model:
             argv += ["--model", config.settings.agent_model]
+        if spec.resume_session and SESSION_ID.fullmatch(spec.resume_session):
+            argv += ["--resume", spec.resume_session]
         return argv
 
     def env(self, spec: RunSpec) -> dict[str, str]:

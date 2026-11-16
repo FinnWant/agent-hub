@@ -61,6 +61,23 @@ async def mark_compaction(manager: RunManager, run: Run, call: HookCall) -> None
     manager._sys(run, f"The agent's context is being compacted ({how}); it continues from a summary")
 
 
+def outcome(run: Run) -> str:
+    """How a finished run ended, in words for the agent continuing it."""
+    if run.state == "succeeded":
+        how = "finished"
+    elif run.state == "timed_out":
+        how = f"was stopped at its time limit ({run.timeout // 60} min) before finishing"
+    elif run.state == "cancelled":
+        how = "was cancelled by the owner before finishing"
+    else:
+        how = "failed" + (f" ({run.error.splitlines()[0][:200]})" if run.error else "")
+    if run.verify == "failed":
+        how += f", and its checks (`{run.verify_cmd}`) fail"
+    elif run.verify == "passed":
+        how += ", and its checks pass"
+    return how
+
+
 def default_hooks() -> list[HookHandler]:
     from .verify import stop_handler
 
@@ -141,9 +158,21 @@ class RunManager:
     # ---- commands ------------------------------------------------------------
 
     def create(self, *, sandbox_id: str, prompt: str, runner: str, timeout: int | None,
-               max_turns: int | None, ip: str) -> Run:
-        """Validate and record a run. Call `launch(run)` from the event loop afterwards."""
+               max_turns: int | None, ip: str, continue_from: str | None = None) -> Run:
+        """Validate and record a run. Call `launch(run)` from the event loop afterwards.
+        `continue_from`: a finished run of this sandbox whose branch (and agent session) the new
+        run picks up."""
         s = config.settings
+        if continue_from is not None:
+            parent = self.db.get_run(continue_from)
+            if parent is None or parent.sandbox_id != sandbox_id:
+                raise NotFound("No such run in this sandbox to continue")
+            if parent.active:
+                raise InvalidTransition("That run is still going; send it a message instead")
+            if not parent.base_branch or not parent.branch:
+                raise InvalidTransition("That run never got as far as its branch, so there's nothing to continue")
+            if parent.runner != runner:
+                raise InvalidTransition("A run can only be continued by the same agent")
         sb = self.sandboxes.get(sandbox_id)
         if sb.state != "running" or not sb.container_id:
             raise InvalidTransition("Start the sandbox first")
@@ -170,10 +199,10 @@ class RunManager:
             run = Run(id=rid, sandbox_id=sandbox_id, runner=runner, prompt=prompt,
                       timeout=min(timeout or s.run_timeout_default, s.run_timeout_max),
                       max_turns=min(max_turns or s.run_max_turns_default, s.run_max_turns_max),
-                      branch=f"agent/{rid}", verify_cmd=sb.verify_cmd or None)
+                      branch=f"agent/{rid}", verify_cmd=sb.verify_cmd or None, parent_run_id=continue_from)
             self.db.insert_run(run)
-        self.db.audit(ip, "run.start", sandbox_id, detail={"run": rid, "runner": runner,
-                                                           "prompt": prompt[:200]})
+        self.db.audit(ip, "run.start", sandbox_id, detail={"run": rid, "runner": runner, "prompt": prompt[:200],
+                                                           **({"continues": continue_from} if continue_from else {})})
         self.emit(run, {"type": "status", "state": "queued"})
         return run
 
@@ -284,6 +313,26 @@ class RunManager:
                        # one matcher only if every handler of the event agrees; else all calls
                        hook_matchers={e: next(iter(m)) for e, m in matchers.items() if len(m) == 1 and None not in m})
 
+    # ---- continuing a run ------------------------------------------------------
+
+    def _continue(self, spec: RunSpec, run: Run, parent: Run) -> None:
+        """The new run's first message: how the previous run ended, then the new request. If the
+        agent's session can't be resumed, also what the previous run was asked and said."""
+        note = (f"[Kiln] This continues an earlier run in this sandbox. That run {outcome(parent)}. "
+                f"Its work is committed on this branch, which starts where it stopped.")
+        spec.prompt = f"{note}\n\n{run.prompt}"
+        spec.resume_session = parent.session_id
+        summary = self._last_result(parent.id) or "(it gave no summary)"
+        spec.fallback_prompt = (f"{note} You don't have that conversation any more; here is what matters.\n\n"
+                                f"It was asked:\n{parent.prompt[:4000]}\n\nIts final summary:\n{summary[:4000]}"
+                                + ("\n\nIt continued an even earlier run; look at the git log for the rest."
+                                   if parent.parent_run_id else "")
+                                + f"\n\nNow:\n{run.prompt}")
+
+    def _last_result(self, run_id: str) -> str | None:
+        texts = [e.get("text") for e in self.db.run_events(run_id) if e.get("kind") == "result"]
+        return texts[-1] if texts else None
+
     # ---- hooks ---------------------------------------------------------------
 
     def _on_hook(self, run: Run, proc: RunProcess, event: dict[str, Any]) -> None:
@@ -335,11 +384,20 @@ class RunManager:
             if run.id in self._cancel_reason:
                 raise asyncio.CancelledError
             if resume is None:
-                base = await asyncio.to_thread(self.workspace.prepare, sb, run, lambda t: self._sys(run, t))
+                parent = self.db.get_run(run.parent_run_id) if run.parent_run_id else None
+                base = await asyncio.to_thread(self.workspace.prepare, sb, run, lambda t: self._sys(run, t),
+                                               parent.branch if parent else None)
                 self.db.update_run(run, base_branch=base)
                 if not sb.base_branch:
                     self.db.update_sandbox(sb, base_branch=base)
+                if parent:
+                    self._continue(spec, run, parent)
                 proc = await runner.start(spec)
+                if parent:
+                    resumed = getattr(proc, "outcome", None) and proc.outcome.extra.get("resumed")
+                    self._sys(run, f"Continuing run {parent.id} in the same agent session" if resumed else
+                              f"Continuing run {parent.id}; its agent session isn't available, so the agent "
+                              "gets a summary of it instead")
             else:
                 try:
                     proc = await runner.attach(spec, resume)

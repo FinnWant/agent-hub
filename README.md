@@ -202,7 +202,11 @@ queued → running → succeeded | failed | cancelled | timed_out
    host* (with the GitHub token if set), bundles it, and copies the bundle in. No repository:
    `/workspace` becomes a fresh git repo. A dirty working tree is refused, so every run starts
    clean.
-2. **Branch** `agent/<run-id>` from the base branch.
+2. **Branch** `agent/<run-id>` from the base branch, or, when you **continue** a finished run
+   (cancelled and timed-out ones too), from that run's branch. A continuation resumes the
+   agent's Claude Code session (`--resume`) if it's still in the sandbox; otherwise the agent
+   gets what the earlier run was asked and its summary. Either way it's told how that run
+   ended. Diff and push still compare against the base branch.
 3. **Agent:** `claude -p` with stream-json input and output, `--replay-user-messages`,
    `--max-turns`, and `--permission-mode bypassPermissions` (the sandbox is the permission
    boundary), as user `agent` in its own process session. The CLI is a pinned,

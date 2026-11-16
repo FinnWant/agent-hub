@@ -551,6 +551,7 @@ class StartRun(BaseModel):
     runner: str = Field(default="claude-code", max_length=40)
     timeout_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
     max_turns: int | None = Field(default=None, ge=1, le=10_000)
+    continue_from: str | None = Field(default=None, pattern=r"^[0-9a-f]{12}$")  # a finished run's id
 
 
 @app.get("/api/sandboxes/{sandbox_id}/runs")
@@ -564,7 +565,7 @@ async def start_run(sandbox_id: str, body: StartRun, _: Admin, request: Request,
     run = await asyncio.to_thread(
         runs.create, sandbox_id=sandbox_id, prompt=body.prompt.strip(), runner=body.runner,
         timeout=body.timeout_minutes * 60 if body.timeout_minutes else None, max_turns=body.max_turns,
-        ip=auth.client_ip(request))
+        ip=auth.client_ip(request), continue_from=body.continue_from)
     runs.launch(run)
     return run_out(run)
 

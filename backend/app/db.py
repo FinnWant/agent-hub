@@ -97,6 +97,7 @@ MIGRATIONS = [
     ("runs", "verify_cmd", "TEXT"),     # the sandbox's checks when the run started
     ("runs", "verify", "TEXT"),         # passed | failed | None (no checks, or not run)
     ("runs", "verify_attempts", "INTEGER NOT NULL DEFAULT 0"),  # times the agent was sent back
+    ("runs", "parent_run_id", "TEXT"),  # the run this one continues (its branch and session)
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -155,6 +156,7 @@ class Run:
     verify_cmd: str | None = None
     verify: str | None = None
     verify_attempts: int = 0
+    parent_run_id: str | None = None
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)

@@ -53,7 +53,7 @@ class Finalized:
 
 
 class Workspace(Protocol):
-    def prepare(self, sb: Sandbox, run: Run, log) -> str: ...
+    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str: ...
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized: ...
     def push(self, sb: Sandbox, run: Run, log) -> bool: ...
 
@@ -97,7 +97,12 @@ if ! git rev-parse -q --verify "refs/heads/$AH_BASE" >/dev/null; then
     echo "NOBASE"; exit 0
   fi
 fi
-git checkout -q -b "$AH_BRANCH" "$AH_BASE"
+if [ -n "$AH_FROM" ]; then
+  git rev-parse -q --verify "refs/heads/$AH_FROM" >/dev/null || { echo "NOFROM"; exit 0; }
+  git checkout -q -b "$AH_BRANCH" "$AH_FROM"
+else
+  git checkout -q -b "$AH_BRANCH" "$AH_BASE"
+fi
 echo OK
 """
 
@@ -190,7 +195,10 @@ class GitWorkspace:
             raise WorkspaceError(r.output.strip()[-500:] or f"git step failed ({r.exit_code})")
         return r.output.strip()
 
-    def prepare(self, sb: Sandbox, run: Run, log) -> str:
+    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str:
+        """Clone or init /workspace if needed and check out the run's branch: from the base
+        branch, or from `start_from` (a previous run's branch, when continuing it). Returns the
+        base branch, which the diff and push compare against either way."""
         s = config.settings
         state = self._sh(sb, STATE_SCRIPT).splitlines()[-1]
         base = sb.base_branch
@@ -210,7 +218,9 @@ class GitWorkspace:
                 base = base or self._sh(sb, INIT_SCRIPT).splitlines()[-1]
         elif not base:
             base = self._sh(sb, DEFAULT_BRANCH_SCRIPT).splitlines()[-1]
-        out = self._sh(sb, BRANCH_SCRIPT, {"AH_BASE": base, "AH_BRANCH": run.branch or "",
+        if start_from and not BRANCH_RE.fullmatch(start_from):
+            raise WorkspaceError(f"Can't continue from branch {start_from!r}")
+        out = self._sh(sb, BRANCH_SCRIPT, {"AH_BASE": base, "AH_BRANCH": run.branch or "", "AH_FROM": start_from or "",
                                            "AH_GIT_NAME": s.git_author_name, "AH_GIT_EMAIL": s.git_author_email})
         last = out.splitlines()[-1]
         if last.startswith("DIRTY"):
@@ -218,7 +228,9 @@ class GitWorkspace:
                                  "them in the terminal first, so the agent starts from a clean tree.")
         if last == "NOBASE":
             raise WorkspaceError(f"Base branch {base!r} doesn't exist in the repository.")
-        log(f"On branch {run.branch} from {base}")
+        if last == "NOFROM":
+            raise WorkspaceError(f"The previous run's branch {start_from} no longer exists in the sandbox.")
+        log(f"On branch {run.branch} from {start_from or base}")
         return base
 
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized:
@@ -275,14 +287,16 @@ class FakeWorkspace:
     def __init__(self) -> None:
         self.pushed: list[str] = []
         self.fail_prepare: str | None = None
+        self.started_from: str | None = None
 
-    def prepare(self, sb: Sandbox, run: Run, log) -> str:
+    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str:
         if self.fail_prepare:
             raise WorkspaceError(self.fail_prepare)
-        if sb.repo_url:
+        if sb.repo_url and not start_from:
             log(f"Cloning {sb.repo_url}")
         base = sb.base_branch or "main"
-        log(f"On branch {run.branch} from {base}")
+        self.started_from = start_from
+        log(f"On branch {run.branch} from {start_from or base}")
         return base
 
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized:

@@ -36,6 +36,7 @@ function duration(run: Run, now: number): string {
 export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo | null }) {
   const [runs, setRuns] = useState<Run[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  const [continuing, setContinuing] = useState<Run | null>(null);
   const toast = useToast();
 
   const reload = useCallback(async () => {
@@ -60,10 +61,12 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
   return (
     <div className="runs">
       <aside className="runs-side">
-        <Composer sb={sb} system={system} busyRun={active ?? null}
+        <Composer sb={sb} system={system} busyRun={active ?? null} continuing={continuing}
+          onClearContinue={() => setContinuing(null)}
           onStarted={(run) => {
             setRuns((rs) => [run, ...(rs ?? [])]);
             setSelected(run.id);
+            setContinuing(null);
           }} />
         <div className="runs-history" role="listbox" aria-label="Runs">
           {runs?.length === 0 && <p className="muted" style={{ padding: "8px 4px", margin: 0 }}>No runs yet.</p>}
@@ -76,6 +79,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
               </span>
               <span className="run-item-meta">
                 {STATE_LABEL[r.state]} · {ago(r.created_at)}
+                {r.parent_run_id && ` · continues ${r.parent_run_id.slice(0, 6)}`}
                 {r.verify && ` · checks ${r.verify === "passed" ? "pass" : "fail"}`}
                 {r.cost_usd != null && ` · $${r.cost_usd.toFixed(2)}`}
               </span>
@@ -86,7 +90,8 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
       <section className="runs-main">
         {current ? (
           <RunView key={current.id} initial={current}
-            onChange={(run) => setRuns((rs) => rs?.map((r) => (r.id === run.id ? run : r)) ?? rs)} />
+            onChange={(run) => setRuns((rs) => rs?.map((r) => (r.id === run.id ? run : r)) ?? rs)}
+            onContinue={active ? undefined : setContinuing} />
         ) : (
           <div className="card empty" style={{ height: "100%", justifyContent: "center" }}>
             <h2>Give the agent a task</h2>
@@ -103,12 +108,18 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
 
 /* ---------------------------------------------------------------- Composer */
 
-function Composer({ sb, system, busyRun, onStarted }: {
+function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted }: {
   sb: Sandbox;
   system: SystemInfo | null;
   busyRun: Run | null;
+  continuing: Run | null;
+  onClearContinue: () => void;
   onStarted: (run: Run) => void;
 }) {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (continuing) inputRef.current?.focus();
+  }, [continuing]);
   const [prompt, setPrompt] = useState("");
   const [minutes, setMinutes] = useState<number | "">("");
   const [turns, setTurns] = useState<number | "">("");
@@ -131,6 +142,7 @@ function Composer({ sb, system, busyRun, onStarted }: {
         prompt: prompt.trim(),
         ...(minutes ? { timeout_minutes: Number(minutes) } : {}),
         ...(turns ? { max_turns: Number(turns) } : {}),
+        ...(continuing ? { continue_from: continuing.id } : {}),
       });
       setPrompt("");
       onStarted(run);
@@ -154,9 +166,21 @@ function Composer({ sb, system, busyRun, onStarted }: {
 
   return (
     <div className="card composer">
+      {continuing && (
+        <div className="composer-continue">
+          <span>
+            Continuing <span className="mono">{continuing.id.slice(0, 6)}</span>: {continuing.prompt.split("\n")[0]}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={onClearContinue}
+            aria-label="Start a fresh run instead" title="Start a fresh run instead">
+            <Icon name="clear" size={14} />
+          </button>
+        </div>
+      )}
       <label htmlFor="prompt" className="visually-hidden">Task for the agent</label>
-      <textarea id="prompt" className="input composer-input" rows={4} maxLength={20000}
-        placeholder={sb.repo_url ? "e.g. Add a README section describing this project" : "Describe what the agent should build or change"}
+      <textarea id="prompt" ref={inputRef} className="input composer-input" rows={4} maxLength={20000}
+        placeholder={continuing ? "What should the agent do next?"
+          : sb.repo_url ? "e.g. Add a README section describing this project" : "Describe what the agent should build or change"}
         value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKey} disabled={!!blocked && !busyRun} />
       {advanced && (
         <div className="composer-advanced">
@@ -236,7 +260,11 @@ function useRunEvents(runId: string, onDone: () => void) {
   return { events, conn };
 }
 
-function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => void }) {
+function RunView({ initial, onChange, onContinue }: {
+  initial: Run;
+  onChange: (run: Run) => void;
+  onContinue?: (run: Run) => void;
+}) {
   const [run, setRun] = useState(initial);
   const [now, setNow] = useState(Date.now() / 1000);
   const [cancelling, setCancelling] = useState(false);
@@ -324,6 +352,12 @@ function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => 
           {turnsUsed != null && <span className="mono muted">{turnsUsed}/{run.max_turns} turns</span>}
           <span className="spacer" />
           {conn !== "live" && active && <span className="muted" style={{ fontSize: 12 }}>reconnecting…</span>}
+          {!active && onContinue && run.base_branch && run.runner === "claude-code" && (
+            <button className="btn btn-sm" onClick={() => onContinue(run)}
+              title="Start a new run on top of this one's branch, in the same agent session">
+              Continue
+            </button>
+          )}
           {active && (
             <button className="btn btn-danger btn-sm" onClick={cancel} disabled={cancelling}>
               <Icon name="stop" size={14} /> {cancelling ? "Cancelling…" : "Cancel"}

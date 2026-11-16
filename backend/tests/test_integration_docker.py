@@ -404,6 +404,36 @@ def test_real_claude_code_is_sent_back_by_failing_checks(real):
     assert r.output.strip() == "1.0", r.output
 
 
+def test_real_claude_code_continues_a_run(real):
+    """With your Claude token (skipped if none): a follow-up run resumes the first run's agent
+    session (it remembers a word that was never written down) and builds on its branch."""
+    import asyncio
+
+    from app import config
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    sb = _sandbox(svc, created, "run-continue")
+    runs = _manager(svc)
+    first = runs.create(sandbox_id=sb.id, prompt="Remember this code word for later, but don't write it to any "
+                        "file: PELICAN. Now create a file named a.txt containing exactly the word a.",
+                        runner="claude-code", timeout=300, max_turns=6, ip="t")
+    asyncio.run(runs._execute(first))
+    assert svc.db.get_run(first.id).state == "succeeded"
+    second = runs.create(sandbox_id=sb.id, prompt="Create a file named b.txt containing exactly the code word "
+                         "I gave you earlier.", runner="claude-code", timeout=300, max_turns=6, ip="t",
+                         continue_from=first.id)
+    asyncio.run(runs._execute(second))
+    done = svc.db.get_run(second.id)
+    evs = svc.db.run_events(second.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    assert any("in the same agent session" in (e.get("text") or "") for e in evs), evs[:8]
+    for name, word in (("a.txt", "a"), ("b.txt", "PELICAN")):  # a.txt comes from the first run
+        r = svc.exec(sb.id, f"git show {done.branch}:{name}", 30, "t")
+        assert r.output.strip() == word, (name, r.output)
+
+
 # ---------------------------------------------------------------------------
 # Files, diff, preview, stats, prune (phase 4)
 # ---------------------------------------------------------------------------
