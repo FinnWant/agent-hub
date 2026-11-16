@@ -67,10 +67,51 @@ def test_lifecycle_limits_and_egress(real):
         host, port = t.rsplit(":", 1)
         r = svc.exec(sb.id, ["nc", "-z", "-w", "3", host, port], 15, "test")
         assert r.exit_code != 0, f"sandbox reached {t}; egress filter is not working"
+    # No global IPv6 address in the sandbox (the egress filter only knows the host's own v6
+    # addresses, so v6 to other LAN devices must not be possible at all).
+    r = svc.exec(sb.id, ["sh", "-c", "awk '$4 == \"00\" {print $1}' /proc/net/if_inet6"], 15, "test")
+    assert r.output.strip() == "", f"sandbox has a global IPv6 address: {r.output}"
 
     svc.destroy(sb.id, "test")
     assert svc.backend.status(sb.container_id) == "missing"
     assert not svc.backend.client.volumes.list(filters={"name": sb.volume})
+    assert svc.backend._network(f"kiln-sb-{sb.id}") is None  # its network went with it
+
+
+def test_sandboxes_are_isolated_and_reach_claude_only_through_the_gateway(real):
+    """Each sandbox has its own network: it can't reach another sandbox, and it reaches the
+    Claude gateway only while it has a key, which stops working once revoked."""
+    from app import config
+    from app.gateway import Gateway
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    a, b = _sandbox(svc, created, "iso-a"), _sandbox(svc, created, "iso-b")
+    svc.exec(b.id, ["sh", "-c", "nohup python3 -m http.server 8000 >/dev/null 2>&1 &"], 10, "test")
+    nets = svc.backend.client.containers.get(b.container_id).attrs["NetworkSettings"]["Networks"]
+    assert list(nets) == [f"kiln-sb-{b.id}"]
+    b_ip = nets[f"kiln-sb-{b.id}"]["IPAddress"]
+    r = svc.exec(a.id, ["nc", "-z", "-w", "3", b_ip, "8000"], 15, "test")
+    assert r.exit_code != 0, "sandbox a reached sandbox b"
+
+    gw = Gateway(svc.backend)
+    key = gw.issue(a.id, "itestgateway")
+    probe = ('curl -sS --max-time 30 -H "Authorization: Bearer $K" -H "content-type: application/json" '
+             '-H "anthropic-version: 2023-06-01" -d "{}" http://kiln-gateway:8080/v1/messages')
+    try:
+        r = svc.exec(a.id, ["sh", "-c", probe.replace("$K", key)], 60, "test")
+        assert "kiln_gateway" not in r.output and "invalid_request_error" in r.output, r.output  # reached the API
+        r = svc.exec(a.id, ["sh", "-c", probe.replace("$K", "sk-ant-oat01-kiln-guess")], 60, "test")
+        assert "kiln_gateway" in r.output, r.output
+        r = svc.exec(b.id, ["sh", "-c", probe.replace("$K", key)], 60, "test")
+        assert r.exit_code != 0 and "Could not resolve" in r.output, r.output  # not on b's network
+    finally:
+        gw.revoke("itestgateway")
+    r = svc.exec(a.id, ["sh", "-c", probe.replace("$K", key)], 60, "test")
+    assert "kiln_gateway" in r.output, r.output  # revoked: refused by the gateway
+    env = svc.exec(a.id, ["sh", "-c", "cat /proc/1/environ; env"], 15, "test").output
+    assert config.settings.claude_code_oauth_token not in env
 
 
 def test_stop_and_start_keep_workspace(real):
@@ -213,6 +254,81 @@ def test_real_claude_code_run(real):
     assert config.settings.claude_code_oauth_token not in json.dumps(evs)
     r = svc.exec(sb.id, f"git show {done.branch}:hello.txt", 30, "t")
     assert r.output.strip() == "hi", r.output
+
+
+def test_run_survives_a_kiln_restart(real):
+    """Kiln dies mid-run (simulated: the first manager is dropped without any clean-up); a new
+    one re-attaches to the agent still running in the sandbox and stores nothing twice."""
+    import asyncio
+    import json
+    import time
+
+    svc, created = real
+    sb = _sandbox(svc, created, "run-restart")
+    first = _manager(svc)
+    run = first.create(sandbox_id=sb.id, prompt="echo one; sleep 4; echo two; echo done > out.txt",
+                       runner="script", timeout=120, max_turns=1, ip="t")
+
+    async def crash_after_first_line():
+        # What RunManager._execute does, by hand, so it can stop without cleaning up.
+        first._status(run, "running", started_at=time.time())
+        base = await asyncio.to_thread(first.workspace.prepare, sb, run, lambda t: None)
+        svc.db.update_run(run, base_branch=base)
+        proc = await first.runners["script"].start(first._spec(run, sb))
+        svc.db.update_run(run, runner_state=json.dumps(proc.state()))
+        async for ev in proc.events():
+            progress = ev.pop("_progress", False)
+            first.emit(run, ev, proc.state() if progress else None)
+            if ev.get("text") == "one":
+                proc.stream.close()  # Kiln is gone; the agent isn't
+                return
+
+    asyncio.run(crash_after_first_line())
+    second = _manager(svc)
+    resumable = second.reconcile_on_startup()
+    assert [r.id for r, _ in resumable] == [run.id]
+    asyncio.run(second._execute(svc.db.get_run(run.id), resume=resumable[0][1]))
+    done = svc.db.get_run(run.id)
+    assert done.state == "succeeded" and done.commit_sha, done
+    texts = [e.get("text") for e in svc.db.run_events(run.id)]
+    assert texts.count("one") == 1 and texts.count("two") == 1, texts
+    r = svc.exec(sb.id, f"git show {done.branch}:out.txt; ls /tmp/kiln-runs", 30, "t")
+    assert r.output.split() == ["done"], r.output  # committed, and the run directory is cleaned up
+
+
+def test_real_claude_code_takes_a_message_mid_run(real):
+    """With your Claude token (skipped if none): a message sent while the agent works is read,
+    acted on, and the run still ends by itself."""
+    import asyncio
+
+    from app import config
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    sb = _sandbox(svc, created, "run-message")
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="Run the shell command `sleep 15`, then create a file named a.txt "
+                      "containing exactly the word a. Do nothing else.", runner="claude-code", timeout=300,
+                      max_turns=10, ip="t")
+
+    async def go():
+        task = runs.launch(run)
+        for _ in range(300):
+            if any(e.get("kind") == "tool" for e in svc.db.run_events(run.id)):
+                break
+            await asyncio.sleep(0.1)
+        await runs.send(run.id, "Also create a file named b.txt containing exactly the word b.", "t")
+        await asyncio.wait_for(task, 300)
+
+    asyncio.run(go())
+    done = svc.db.get_run(run.id)
+    evs = svc.db.run_events(run.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    assert any(e.get("kind") == "user" for e in evs), "the message never showed as read"
+    for name, word in (("a.txt", "a"), ("b.txt", "b")):  # "exactly the word": maybe no newline
+        r = svc.exec(sb.id, f"git show {done.branch}:{name}", 30, "t")
+        assert r.output.strip() == word, (name, r.output)
 
 
 # ---------------------------------------------------------------------------

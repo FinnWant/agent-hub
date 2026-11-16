@@ -1,4 +1,4 @@
-# Agent Hub
+# Kiln
 
 Run coding agents in isolated sandboxes on a home server, and steer them from a browser or a
 desktop app over a private network.
@@ -7,13 +7,14 @@ Each sandbox is a locked-down container with its own workspace volume. An agent 
 in non-interactive mode, behind a pluggable runner) works on a branch inside it; you watch the
 stream live, review the diff, and approve. Nothing is exposed to the public internet.
 
-> **Status:** Phase 5: a Windows app with native notifications, an installable iPhone app with
-> push notifications, and HTTPS through `tailscale serve`.
+> **Status:** Hardening pass after phase 5: the Claude token stays out of sandboxes, sandboxes
+> are isolated from each other, the diff you review is computed on the host, and the server
+> setup is tightened (see [Security model](#security-model) and [Server hardening](#server-hardening)).
 
 ## Architecture
 
 ```
-Browser / desktop app ── Tailscale ──► Agent Hub :8090  (FastAPI, systemd, user `agenthub`)
+Browser / desktop app ── Tailscale ──► Kiln :8090  (FastAPI, systemd, user `agenthub`)
                                          ├─ REST API + WebSockets
                                          ├─ SQLite: sandboxes, runs, audit log
                                          └─ rootless Docker (per-user daemon)
@@ -57,10 +58,10 @@ bash deploy/integration-test.sh                   # Docker integration tests, as
 
 In the Tailscale admin console, enable **HTTPS Certificates** (DNS page) before installing, and
 allow `tcp:443` and, for previews, `tcp:8200-8299` in your ACL. The installer then serves Agent
-Hub at `https://<server>.<tailnet>.ts.net` through `tailscale serve` (Agent Hub itself listens on
+Hub at `https://<server>.<tailnet>.ts.net` through `tailscale serve` (Kiln itself listens on
 127.0.0.1 only). Certificates are public records, so the machine and tailnet names appear in
 Certificate Transparency logs; nothing becomes reachable from outside your tailnet. Without
-HTTPS (`HTTPS=off` in `.env`) Agent Hub stays on `http://<tailscale-ip>:8090` (`tcp:8090`) and
+HTTPS (`HTTPS=off` in `.env`) Kiln stays on `http://<tailscale-ip>:8090` (`tcp:8090`) and
 everything works except push notifications.
 
 ## Apps and notifications
@@ -68,14 +69,14 @@ everything works except push notifications.
 You're notified when a run finishes, fails or times out, and when a sandbox stops on its own
 (for example, killed for using too much memory).
 
-- **Windows:** the desktop app (`desktop/`, Tauri 2) shows Agent Hub in its own window with
+- **Windows:** the desktop app (`desktop/`, Tauri 2) shows Kiln in its own window with
   native notifications. Closing the window keeps it in the tray. Build it from the
   *Actions → Desktop app (Windows) → Run workflow* button; the installers land in a draft
   release. They aren't code-signed, so SmartScreen asks once. On first launch, enter your
-  Agent Hub address. The app gives your server's pages only two native abilities: notifications
+  Kiln address. The app gives your server's pages only two native abilities: notifications
   and opening links in your browser.
 - **iPhone (iOS 16.4 or later):** open the https address in Safari, tap **Share → Add to Home
-  Screen**, open Agent Hub from the Home Screen, log in, then tap the bell and **Turn on**.
+  Screen**, open Kiln from the Home Screen, log in, then tap the bell and **Turn on**.
   Notifications arrive through Apple's push service even when the app is closed.
 - **Desktop browsers** on the https address can turn on push the same way (bell icon).
 
@@ -93,10 +94,13 @@ sudo systemctl restart agent-hub
 ```
 
 - **Claude:** `claude setup-token` creates a one-year token for your subscription. Anthropic's
-  terms allow it for your own use, so keep Agent Hub single-user. Revoke it from your Claude
-  account settings if you think it leaked.
+  terms allow it for your own use, so keep Kiln single-user. Revoke it from your Claude
+  account settings if you think it leaked. It never enters a sandbox: the **Claude gateway**
+  holds it (see [Agent runs](#agent-runs)).
 - **GitHub:** create a *fine-grained* token at GitHub → Settings → Developer settings, with
-  **only the repositories** agents may work on and **Contents: read and write**. Turn on branch
+  **only the repositories** agents may work on and **Contents: read and write**. Leave
+  **Workflows** off, so agent branches can't change GitHub Actions workflows (and keep
+  `on: push` workflows in those repositories limited to protected branches). Turn on branch
   protection for `main` in those repositories as a second line of defence. Pushing is off per
   sandbox until you enable it in the sandbox's Settings tab.
 
@@ -107,6 +111,7 @@ sudo systemctl restart agent-hub
   start, stop.
 - **Sandbox → Runs:** describe a task and start Claude Code (<kbd>Ctrl/⌘</kbd>+<kbd>Enter</kbd>).
   The log streams live (messages, tool calls, results, cost and turns); cancel at any time.
+  While the agent works you can send it messages; each shows in the log once the agent reads it.
   Each run gets its own branch `agent/<run-id>` from the sandbox's base branch, and whatever
   the agent leaves is committed there. Run history is kept per sandbox.
 - **Sandbox → Changes:** a run's branch against the point where it left the base branch,
@@ -193,24 +198,46 @@ user; see `backend/tests/test_integration_docker.py`.
 queued → running → succeeded | failed | cancelled | timed_out
 ```
 
-1. **Workspace.** If the sandbox has a repository and no clone yet, Agent Hub clones it *on the
+1. **Workspace.** If the sandbox has a repository and no clone yet, Kiln clones it *on the
    host* (with the GitHub token if set), bundles it, and copies the bundle in. No repository:
    `/workspace` becomes a fresh git repo. A dirty working tree is refused, so every run starts
    clean.
 2. **Branch** `agent/<run-id>` from the base branch.
-3. **Agent:** `claude -p` with `--output-format stream-json`, `--max-turns`, and
-   `--permission-mode bypassPermissions` (the sandbox is the permission boundary), as user
-   `agent` in its own process session. Only `CLAUDE_CODE_OAUTH_TOKEN` is added to its
-   environment. The CLI is a pinned, checksum-verified release in a root-owned path, with
-   auto-update and telemetry off.
+3. **Agent:** `claude -p` with stream-json input and output, `--replay-user-messages`,
+   `--max-turns`, and `--permission-mode bypassPermissions` (the sandbox is the permission
+   boundary), as user `agent` in its own process session. The CLI is a pinned,
+   checksum-verified release in a root-owned path, with auto-update and telemetry off.
+
+   **Detached, so runs survive Kiln.** The agent runs detached in the sandbox: its output goes
+   to `/tmp/kiln-runs/<run-id>/out`, which Kiln follows with a separate exec, storing with each
+   event the byte offset reached. Restarting Kiln (an upgrade, a reboot of Kiln alone) doesn't
+   touch the agent: on startup Kiln checks each running run's agent, re-registers its gateway
+   key, and follows the output again from the stored offset, so nothing is lost or logged
+   twice. The run's time limit still counts from its start. Runs whose agent is gone (the
+   sandbox stopped, the server rebooted) are marked failed, and their work is committed.
+
+   **Messages while it works.** The agent reads its input from a FIFO. The prompt is the first
+   message; messages you send are written to it and the agent takes them in at its next step.
+   When the agent has finished and has read every message, Kiln closes its input and it exits.
+
+   **Claude gateway.** The agent never sees your Claude token. It gets a random per-run key and
+   `ANTHROPIC_BASE_URL=http://kiln-gateway:8080`. `kiln-gateway` is a small, locked-down
+   container (read-only, no capabilities, 128 MB) that holds the token; Kiln attaches it to
+   the sandbox's network while the run lasts. It forwards requests carrying a registered key
+   to the Anthropic API, and nowhere else, with the key swapped for the token. Kiln removes the
+   key when the run ends, so a copied key or a process left running stops working. (Setting
+   `CLAUDE_TOKEN_MODE=direct` puts the token in the sandbox instead; only as a fallback.)
 4. **Limits:** one run per sandbox; wall-clock timeout (default 30 min) and cancel both kill the
    agent's whole process session; turn limit; the memory reserve is re-checked before a run.
 5. **Commit** everything the agent left on the branch (also after cancel or timeout, so the
    work can be reviewed).
 6. **Push** (only if enabled for the sandbox, the run succeeded, and the repository is on
-   github.com): the branch is bundled in the sandbox, copied out, fetched into a fresh repo on
-   the host and pushed by URL, exactly `agent/<run-id>`, never forced. Nothing the agent wrote
-   (hooks, `.git/config`, credential helpers) runs alongside the token.
+   github.com): the branch is bundled in the sandbox, streamed out to disk, fetched into a
+   fresh repo on the host and pushed by URL, exactly `agent/<run-id>`, never forced. Nothing
+   the agent wrote (hooks, `.git/config`, credential helpers) runs alongside the token.
+7. **Review.** The Changes tab's diff is computed *on the host* from the same kind of export,
+   with the host's git in a fresh repository. A fake `git` in the sandbox, attributes that
+   mark files as binary, textconv filters or replace refs can't change what you see.
 
 Every log line is redacted for known secrets (and common token shapes) before it is stored or
 streamed.
@@ -222,26 +249,29 @@ to its template's port (8000 python, 5173 node, 3000 static). It is published on
 **Tailscale IP only** (`PREVIEW_BIND`), never `0.0.0.0`, and ufw allows the range only on
 `tailscale0`. A dev server must listen on `0.0.0.0` inside the sandbox.
 
-Preview links use a different hostname from Agent Hub (`PREVIEW_HOST`): the Tailscale IP when
-Agent Hub is on HTTPS at its MagicDNS name, or the MagicDNS name when Agent Hub is on the IP.
-Agent Hub refuses logins and API calls on the preview hostname. Browsers send a host's cookies
-to *every* port on it, so if you opened Agent Hub and a preview on the same hostname, code the
+Preview links use a different hostname from Kiln (`PREVIEW_HOST`): the Tailscale IP when
+Kiln is on HTTPS at its MagicDNS name, or the MagicDNS name when Kiln is on the IP.
+Kiln refuses logins and API calls on the preview hostname. Browsers send a host's cookies
+to *every* port on it, so if you opened Kiln and a preview on the same hostname, code the
 agent wrote could read your session cookie. With different hostnames it never gets one.
 
 ## Security model
 
-Agent Hub runs code written by an AI model, which may in turn have read untrusted text
+Kiln runs code written by an AI model, which may in turn have read untrusted text
 (issues, READMEs, web pages). Treat every sandbox as hostile.
 
 **Isolation**
 - **Rootless Docker.** The Docker daemon runs as the unprivileged `agenthub` user, not root.
   Access to its socket is therefore *not* equivalent to root on the host — the usual
-  `docker` group trade-off does not apply. Agent Hub never mounts the Docker socket into a
+  `docker` group trade-off does not apply. Kiln never mounts the Docker socket into a
   sandbox.
 - Every container: non-root user, all capabilities dropped, `no-new-privileges`, never
   privileged, no host mounts (only its own named volume), memory/CPU/PID limits, and a
   higher OOM score than everything else so the kernel kills a sandbox first.
-- Agent Hub only touches containers labelled `agent-hub.managed=true`.
+- Kiln only touches containers labelled `agent-hub.managed=true`.
+- **Each sandbox has its own Docker network**, so sandboxes can't reach each other (a sandbox
+  made before this moves to its own network the next time it starts). Kiln's own commands in
+  a sandbox use system directories only, never the agent's `~/.local/bin`.
 
 **Network**
 - The API listens only on localhost and the Tailscale/LAN interface; previews only on the
@@ -255,12 +285,15 @@ Agent Hub runs code written by an AI model, which may in turn have read untruste
 
 **Capacity** — global caps protect other workloads on the host: at most 2 running sandboxes,
 6 GB total sandbox memory (4 GB max each), a 3 GB free-memory reserve checked before every
-start, disk I/O limits, and a free-disk floor for new runs.
+start, disk I/O limits, and a free-disk floor for new runs. Sandboxes have no disk quota
+(Docker can't enforce one on ext4), so if free disk drops below `DISK_EMERGENCY_FREE` (5 GB)
+the monitor stops every running sandbox and notifies you. The Kiln service itself is capped at
+1 GB of memory.
 
 **Credentials** — secrets live only in a mode-600 `.env`; the API reports only whether they
-are set. The Claude token goes into the agent process's environment for the length of a run;
-the GitHub token never enters a sandbox (clone and push run on the host). Both are redacted
-from stored and streamed logs. GitHub access is scoped to selected repositories; only
+are set. Neither token enters a sandbox: the Claude token stays in the Claude gateway, and
+clone and push run on the host. Both are redacted from stored and streamed logs (including
+URL-encoded and base64 forms). GitHub access is scoped to selected repositories; only
 `agent/<run-id>` branches are pushed, never `main`/`master`, never forced, and only when you
 enable it per sandbox.
 
@@ -268,7 +301,14 @@ enable it per sandbox.
 cookie, CSRF header on mutating requests, session cookie **and** same-origin `Origin` checks
 on the terminal WebSocket, login rate limiting, fail-closed when no password is set, a strict
 Content-Security-Policy (same-origin scripts only, no framing), and an audit log of every
-action including terminal open/close.
+action including terminal open/close. Logging out ends that session for good (a copied cookie
+stops working). Requests for any hostname other than Kiln's own are refused, so a web page
+can't reach Kiln through a name of its own that resolves to your server (DNS rebinding).
+
+**Server** — program files in `/opt/agent-hub` belong to root; Kiln's account can only write
+its data, its settings and a build folder, so a sandbox escape can't plant code that root or
+the service later runs. The account has no login shell. Preview file servers don't serve
+`.git` (and the Python one hides every dotfile), since preview ports are open to your tailnet.
 
 ### Known risks
 
@@ -277,14 +317,28 @@ action including terminal open/close.
   anything the sandbox can see (including the repo and the model credential) to the
   internet. The sandbox boundary and the network rules limit the blast radius; they do not
   make the agent trustworthy. Review every diff before approving.
-- **The Claude token is visible to the agent.** Its tools inherit the process environment, so
-  a manipulated agent could read the token and send it out. Use a token you can revoke, keep
-  an eye on your usage, and revoke it if a run looks suspicious. (Your GitHub token is not
-  exposed this way.)
+- **The agent can use Claude while its run lasts.** It can't read your token, but anything in
+  the sandbox can send requests through the gateway with the run's key until the run ends.
+- **The agent can edit its own log.** Its output files in `/tmp/kiln-runs` belong to the
+  sandbox user, so it could rewrite what Kiln shows (it could already write to its own output
+  stream). The diff, computed on the host, is what to trust.
 - **Open egress.** Sandboxes may contact any public host. A domain allowlist (egress proxy)
   is planned, not built.
 - **Container escape.** Rootless Docker limits the damage of a kernel or runtime escape to the
   `agenthub` user. gVisor is a possible further hardening step.
+
+## Server hardening
+
+```bash
+sudo bash deploy/security-audit.sh   # read-only snapshot: firewall, open ports, SSH, updates, Kiln
+```
+
+- **Reboot after kernel updates** (`/var/run/reboot-required`): a container escape usually goes
+  through the kernel, so its fixes matter most here.
+- **SSH through Tailscale.** Turn on Tailscale SSH (`sudo tailscale set --ssh`, plus an `ssh`
+  rule in your tailnet policy), check that `ssh you@server` from your laptop logs in without a
+  password, then `sudo bash deploy/ssh-harden.sh` turns off password logins, root logins and X11
+  forwarding (`... ssh-harden.sh undo` reverts). LAN SSH then needs a key; the console always works.
 
 ## Roadmap
 
@@ -293,7 +347,9 @@ action including terminal open/close.
 2. Live terminal and minimal web UI ✓
 3. Agent runs — runner interface, branch workflow, streaming logs, cancel/timeout, redaction ✓
 4. Files, diff review, previews, resource display, disk checks and clean-up, phone layout ✓
-5. Windows app, iPhone home-screen app, notifications, HTTPS *(current)*
+5. Windows app, iPhone home-screen app, notifications, HTTPS ✓
+6. Hardening — Claude gateway, per-sandbox networks, host-side diff, disk guard, root-owned
+   install, session revocation, host check *(current)*
 
 **Later:** gVisor, egress domain allowlist, opening pull requests, multiple runners, run
 templates, scheduled runs.

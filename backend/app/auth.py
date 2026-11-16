@@ -78,28 +78,45 @@ def configured() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Session tokens: "<expiry>.<hmac>", signed with SESSION_SECRET. The password hash is
-# part of the signed data, so setting a new password logs every session out.
+# Session tokens: "<expiry>.<nonce>.<hmac>", signed with SESSION_SECRET. The password hash is
+# part of the signed data, so setting a new password logs every session out; logging out
+# records the session's signature so that one token stops working.
 # ---------------------------------------------------------------------------
 
-def _sign(expiry: int) -> str:
+def _sign(expiry: int, nonce: str) -> str:
     pw_hash, secret = _credentials()
-    return hmac.new(secret.encode(), f"{expiry}|{pw_hash}".encode(), hashlib.sha256).hexdigest()
+    return hmac.new(secret.encode(), f"{expiry}|{nonce}|{pw_hash}".encode(), hashlib.sha256).hexdigest()
 
 
 def make_token() -> tuple[str, int]:
     max_age = config.settings.session_days * 86400
     expiry = int(time.time()) + max_age
-    return f"{expiry}.{_sign(expiry)}", max_age
+    nonce = secrets.token_hex(8)
+    return f"{expiry}.{nonce}.{_sign(expiry, nonce)}", max_age
 
 
-def token_valid(token: str | None) -> bool:
-    if not token or not configured():
+def token_parts(token: str | None) -> tuple[str, int] | None:
+    """(signature, expiry) of a well-formed token, else None."""
+    parts = (token or "").split(".")
+    if len(parts) != 3 or not parts[0].isdigit() or not parts[1] or not parts[2]:
+        return None
+    return parts[2], int(parts[0])
+
+
+def token_valid(token: str | None, revoked=None) -> bool:
+    """`revoked(sig)` says whether that session was ended by logging out."""
+    if not token or not configured() or not (parts := token_parts(token)):
         return False
-    expiry, _, sig = token.partition(".")
-    if not expiry.isdigit() or int(expiry) < time.time():
+    sig, expiry = parts
+    if expiry < time.time() or not hmac.compare_digest(sig, _sign(expiry, token.split(".")[1])):
         return False
-    return hmac.compare_digest(sig, _sign(int(expiry)))
+    return not (revoked and revoked(sig))
+
+
+def _revoked(conn: Request | WebSocket):
+    app = getattr(conn, "app", None)
+    svc = getattr(getattr(app, "state", None), "service", None)
+    return svc.db.session_revoked if svc is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +193,7 @@ def on_preview_host(conn: Request | WebSocket) -> bool:
 
 def require_not_preview_host(request: Request) -> None:
     if on_preview_host(request):
-        raise HTTPException(403, "This hostname is reserved for previews. Open Kiln by its IP address instead.")
+        raise HTTPException(403, "This hostname is reserved for previews. Open Kiln at its usual address instead.")
 
 
 def require_configured() -> None:
@@ -195,7 +212,7 @@ def require_admin(request: Request) -> None:
     require_configured()
     if request.method not in ("GET", "HEAD"):
         require_csrf(request)
-    if not token_valid(request.cookies.get(COOKIE)):
+    if not token_valid(request.cookies.get(COOKIE), _revoked(request)):
         raise HTTPException(401, "Log in first")
 
 
@@ -204,4 +221,4 @@ def ws_allowed(ws: WebSocket) -> bool:
     origin = ws.headers.get("origin")
     if not origin or origin not in allowed_origins(ws) or on_preview_host(ws):
         return False
-    return token_valid(ws.cookies.get(COOKIE))
+    return token_valid(ws.cookies.get(COOKIE), _revoked(ws))

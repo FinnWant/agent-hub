@@ -49,6 +49,11 @@ class LocalBackend:
     def get_file(self, container_id, path, max_size):
         return Path(path).read_bytes()
 
+    def get_file_to(self, container_id, path, dest, max_size):
+        data = Path(path).read_bytes()
+        Path(dest).write_bytes(data)
+        return len(data)
+
 
 @pytest.fixture
 def origin(tmp_path):
@@ -68,8 +73,7 @@ def env(tmp_path, settings, monkeypatch):
     monkeypatch.setattr(config, "settings", dataclasses.replace(settings, github_token=GH_TOKEN))
     backend = LocalBackend(tmp_path / "box")
     (tmp_path / "box").mkdir(exist_ok=True)
-    w = GitWorkspace(backend, in_bundle=str(tmp_path / "box" / "in.bundle"),
-                     out_bundle=str(tmp_path / "box" / "out.bundle"))
+    w = GitWorkspace(backend, in_bundle=str(tmp_path / "box" / "in.bundle"))
     return w, backend
 
 

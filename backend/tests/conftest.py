@@ -32,6 +32,7 @@ def settings(monkeypatch):
         total_sandbox_memory=6 * GIB, memory_reserve=3 * GIB, default_sandbox_cpus=2,
         max_sandbox_cpus=4, min_free_disk=15 * GIB, io_device="", container_runtime="",
         stats_interval=0, preview_bind="", preview_host="", public_url="", trust_proxy=False,
+        extra_allowed_hosts=["testserver", "hub"],
     )
     monkeypatch.setattr(config, "settings", s)
     auth.login_limiter._fails.clear()

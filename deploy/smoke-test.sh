@@ -24,7 +24,7 @@ sx()   { # run a shell command in the sandbox; prints output, returns its exit c
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("output", d).strip() if isinstance(d.get("output"), str) else d); sys.exit(d.get("exit_code", 99))' "$out"
 }
 
-echo "Agent Hub checks against $BASE"
+echo "Kiln checks against $BASE"
 
 echo "-- auth"
 [[ $(code "$BASE/api/health") == 200 ]] && ok "health is public" || bad "health"
@@ -112,9 +112,9 @@ else
   done
   PHOST=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.urlsplit(sys.argv[1]).hostname)' "$PURL")
   if [[ $BASE == https://* ]]; then
-    # Agent Hub listens on localhost only; the preview host (the IP) must not serve it at all.
-    if curl -s --max-time 3 -o /dev/null "http://$PHOST:8090/api/health"; then bad "Agent Hub answers on the preview host $PHOST:8090"
-    else ok "Agent Hub not reachable on the preview host ($PHOST)"; fi
+    # Kiln listens on localhost only; the preview host (the IP) must not serve it at all.
+    if curl -s --max-time 3 -o /dev/null "http://$PHOST:8090/api/health"; then bad "Kiln answers on the preview host $PHOST:8090"
+    else ok "Kiln not reachable on the preview host ($PHOST)"; fi
     [[ $(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/health") == 200 ]] && ok "HTTPS via tailscale serve" || bad "HTTPS health"
   else
     c=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PHOST:8090" "${CSRF[@]}" -H 'Content-Type: application/json' \

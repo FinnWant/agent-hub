@@ -24,7 +24,7 @@ from .db import Run
 from .monitor import Monitor
 from .notify import Notifier, push_endpoint_ok
 from .docker_backend import Backend, BackendError, DockerBackend, FakeBackend, NotManaged
-from .runners import default_runners
+from .runners import MAX_MESSAGE, RunError, default_runners
 from .runs import RunManager
 from .sandboxes import InvalidTransition, SandboxError, SandboxService
 from .templates import TEMPLATES
@@ -59,7 +59,15 @@ async def lifespan(app: FastAPI):
     svc.on_problem = notifier.sandbox_problem
     app.state.runs.on_finished = notifier.run_finished
     svc.reconcile_on_startup()
-    app.state.runs.reconcile_on_startup()
+    # Agents still running in their sandboxes are followed again; their gateway keys stay valid.
+    resumable = await asyncio.to_thread(app.state.runs.reconcile_on_startup)
+    keep = {str(st["key_digest"]) for _, st in resumable if st.get("key_digest")}
+    for runner in app.state.runs.runners.values():
+        if gw := getattr(runner, "gateway", None):
+            await asyncio.to_thread(gw.revoke_all, keep)
+    for run, state in resumable:
+        log.info("re-attaching to run %s", run.id)
+        app.state.runs.resume(run, state)
     try:
         svc.backend.ensure_network()
     except Exception as e:  # keep serving so /api/health can report the problem
@@ -95,6 +103,27 @@ Admin = Annotated[None, Depends(auth.require_admin)]
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self'; "
        "manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+
+
+class HostCheck:
+    """Refuse requests (and WebSockets) for host names Kiln isn't served at."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            host = next((v.decode("latin-1") for k, v in scope.get("headers", []) if k == b"host"), "")
+            if not config.settings.host_allowed(host):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 4403})
+                    return
+                await PlainTextResponse("Unknown host", status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(HostCheck)
 
 
 @app.middleware("http")
@@ -180,6 +209,9 @@ def login(body: LoginBody, request: Request, response: Response, svc: Svc) -> di
 
 @app.post("/api/auth/logout")
 def logout(_: Admin, request: Request, response: Response, svc: Svc) -> dict:
+    # End this session for good, so a copy of the cookie stops working too.
+    if parts := auth.token_parts(request.cookies.get(auth.COOKIE)):
+        svc.db.revoke_session(*parts)
     response.delete_cookie(auth.COOKIE, path="/")
     svc.db.audit(auth.client_ip(request), "auth.logout")
     return {"ok": True}
@@ -504,7 +536,11 @@ async def push_test(_: Admin, notifier: Notif) -> dict:
 # ---------------------------------------------------------------------------
 
 def run_out(run: Run) -> dict:
-    return run.to_dict()
+    out = run.to_dict()
+    out.pop("runner_state", None)  # internal (offsets, gateway key digest)
+    runs = getattr(app.state, "runs", None)
+    out["can_message"] = bool(runs and run.active and runs.can_send(run.id))
+    return out
 
 
 class StartRun(BaseModel):
@@ -539,6 +575,20 @@ def get_run(run_id: str, _: Admin, runs: Runs) -> dict:
 def run_log(run_id: str, _: Admin, runs: Runs, after: int = Query(-1, ge=-1)) -> list[dict]:
     runs.get(run_id)
     return runs.db.run_events(run_id, after_seq=after, limit=5000)
+
+
+class RunMessage(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_MESSAGE)
+
+
+@app.post("/api/runs/{run_id}/messages", status_code=202)
+async def send_run_message(run_id: str, body: RunMessage, _: Admin, request: Request, runs: Runs) -> dict:
+    """Send the owner's message to a running agent. It shows in the log once the agent reads it."""
+    try:
+        await runs.send(run_id, body.text, auth.client_ip(request))
+    except RunError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True}
 
 
 @app.post("/api/runs/{run_id}/cancel")

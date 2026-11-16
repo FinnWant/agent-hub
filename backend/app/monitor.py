@@ -46,7 +46,32 @@ class Monitor:
         self._sized_at[sandbox_id] = time.monotonic()
         return size
 
+    def guard_disk(self) -> list[str]:
+        """Stop every running sandbox if free disk falls below DISK_EMERGENCY_FREE. Sandboxes
+        have no disk quota (Docker can't enforce one on ext4), so this is the backstop."""
+        free = self.svc.host_state().free_disk
+        if free >= config.settings.disk_emergency_free:
+            return []
+        stopped = []
+        why = (f"Stopped to protect the server: only {free / 2**30:.1f} GB of disk was left. Free some "
+               "space (Clean up on the Sandboxes page, or delete files in a sandbox) before starting it again.")
+        for sb in self.svc.running():
+            try:
+                self.svc.stop(sb.id, "system")
+            except Exception:  # noqa: BLE001
+                log.exception("couldn't stop %s for low disk", sb.id)
+                continue
+            self.svc.db.update_sandbox(sb, error=why)
+            self.svc._problem(sb, why)
+            stopped.append(sb.id)
+        if stopped:
+            log.warning("low disk (%d bytes free): stopped %s", free, ", ".join(stopped))
+            self.svc.db.audit("system", "disk.emergency_stop", None, ok=True,
+                              detail={"free_bytes": free, "stopped": stopped})
+        return stopped
+
     def tick(self) -> None:
+        self.guard_disk()
         self.svc.list()  # reconciles states: notices sandboxes that died on their own
         self.measure_memory()
         interval = config.settings.workspace_size_interval

@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS runs_sandbox ON runs(sandbox_id, created_at);
 CREATE INDEX IF NOT EXISTS runs_state ON runs(state);
 
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+    sig         TEXT PRIMARY KEY,
+    expires     REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS push_subscriptions (
     endpoint    TEXT PRIMARY KEY,
     p256dh      TEXT NOT NULL,
@@ -86,6 +91,8 @@ MIGRATIONS = [
     ("sandboxes", "allow_push", "INTEGER NOT NULL DEFAULT 0"),
     ("sandboxes", "preview_port", "INTEGER"),
     ("sandboxes", "workspace_bytes", "INTEGER"),
+    ("runs", "session_id", "TEXT"),
+    ("runs", "runner_state", "TEXT"),   # JSON: where to re-attach after a Kiln restart
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -138,6 +145,8 @@ class Run:
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
+    session_id: str | None = None        # the agent's own session (Claude Code), when it reports one
+    runner_state: str | None = None      # internal; never sent to the browser
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)
@@ -232,10 +241,28 @@ class Database:
             rows = self._conn.execute(q, args).fetchall()
         return [Run(**dict(r)) for r in rows]
 
-    def add_run_event(self, run_id: str, seq: int, ts: float, data: dict[str, Any]) -> None:
+    def add_run_event(self, run_id: str, seq: int, ts: float, data: dict[str, Any] | None,
+                      runner_state: dict[str, Any] | None = None) -> None:
+        """Store an event (None: none to store) and, if given, the runner state reached with it,
+        in one transaction, so a restart re-attaches exactly after the stored events."""
         with self._lock:
-            self._conn.execute("INSERT INTO run_events (run_id, seq, ts, data) VALUES (?, ?, ?, ?)",
-                               (run_id, seq, ts, json.dumps(data)))
+            self._conn.execute("BEGIN")
+            try:
+                if data is not None:
+                    self._conn.execute("INSERT INTO run_events (run_id, seq, ts, data) VALUES (?, ?, ?, ?)",
+                                       (run_id, seq, ts, json.dumps(data)))
+                if runner_state is not None:
+                    self._conn.execute("UPDATE runs SET runner_state = ? WHERE id = ?",
+                                       (json.dumps(runner_state), run_id))
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def last_run_seq(self, run_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT MAX(seq) FROM run_events WHERE run_id = ?", (run_id,)).fetchone()
+        return -1 if row[0] is None else int(row[0])
 
     def run_events(self, run_id: str, after_seq: int = -1, limit: int = 100_000) -> list[dict[str, Any]]:
         with self._lock:
@@ -272,6 +299,17 @@ class Database:
                                    (endpoint,))
                 # A device that has failed many times in a row is gone for good.
                 self._conn.execute("DELETE FROM push_subscriptions WHERE endpoint = ? AND failures >= 20", (endpoint,))
+
+    # ---- sessions ending at logout -------------------------------------------------
+
+    def revoke_session(self, sig: str, expires: float) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM revoked_sessions WHERE expires < ?", (time.time(),))
+            self._conn.execute("INSERT OR IGNORE INTO revoked_sessions (sig, expires) VALUES (?, ?)", (sig, expires))
+
+    def session_revoked(self, sig: str) -> bool:
+        with self._lock:
+            return self._conn.execute("SELECT 1 FROM revoked_sessions WHERE sig = ?", (sig,)).fetchone() is not None
 
     # ---- audit -------------------------------------------------------------
 

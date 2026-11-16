@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check that no configured secret appears in Agent Hub's database or service logs.
+# Check that no configured secret appears in Kiln's database or service logs.
 #   sudo bash deploy/secret-scan.sh
 # The secret values are read from .env into a private temp file and passed to grep with -f,
 # so they never appear on a command line. Prints counts only, never the values.

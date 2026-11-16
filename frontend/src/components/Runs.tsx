@@ -260,6 +260,31 @@ function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => 
     return () => clearInterval(t);
   }, [active]);
 
+  // Messages to the agent show as "not read yet" until the agent reads them (a `user` event);
+  // it reads them in order, so message n is read once there are base + n + 1 user events.
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState<string[]>([]);
+  const base = useRef<number | null>(null);
+  const read = events.filter((e) => e.type === "log" && e.kind === "user").length;
+  const unread = sent.filter((_, n) => read < (base.current ?? 0) + n + 1);
+  const sendMessage = async () => {
+    const text = draft.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await api.sendRunMessage(run.id, text);
+      if (base.current === null) base.current = read;
+      setSent((s) => [...s, text]);
+      setDraft("");
+      setFollow(true);
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSending(false);
+    }
+  };
+
   const cancel = async () => {
     setCancelling(true);
     try {
@@ -314,10 +339,38 @@ function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => 
       </header>
       <div className="run-log" ref={logRef} onScroll={onScroll} aria-live="polite">
         {events.map((e) => <EventLine key={e.seq} e={e} />)}
+        {active && unread.map((text, i) => (
+          <div key={`p${i}`} className="ev ev-user ev-user-pending">
+            <span className="ev-user-label">You · not read yet</span>
+            {text}
+          </div>
+        ))}
         {active && <div className="ev ev-pending"><span className="dot run-dot-running" /> working…</div>}
       </div>
       {!follow && (
         <button className="btn btn-sm jump" onClick={() => setFollow(true)}>Jump to latest <Icon name="arrowDown" size={14} /></button>
+      )}
+      {active && run.runner === "claude-code" && (
+        <form className="run-steer" onSubmit={(e) => { e.preventDefault(); sendMessage(); }}>
+          <textarea
+            className="input run-steer-input"
+            rows={1}
+            maxLength={4000}
+            placeholder="Message the agent while it works…"
+            aria-label="Message the agent"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                sendMessage();
+              }
+            }}
+          />
+          <button className="btn btn-sm" type="submit" disabled={sending || !draft.trim()}>
+            {sending ? "Sending…" : "Send"}
+          </button>
+        </form>
       )}
     </div>
   );
@@ -343,6 +396,13 @@ function EventLine({ e }: { e: RunEvent }) {
       return <div className="ev ev-text">{e.text}</div>;
     case "result":
       return <div className="ev ev-result">{e.text}</div>;
+    case "user":
+      return (
+        <div className="ev ev-user">
+          <span className="ev-user-label">You</span>
+          {e.text}
+        </div>
+      );
     case "tool":
       return (
         <div className="ev ev-tool">

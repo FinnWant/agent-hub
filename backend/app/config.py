@@ -64,6 +64,8 @@ class Settings:
     # The address you open Kiln at, when it sits behind HTTPS (`tailscale serve`), e.g.
     # https://myserver.tailnet.ts.net. Enables Secure cookies, the installable app and Web Push.
     public_url: str = os.getenv("PUBLIC_URL", "").rstrip("/")
+    # Host names Kiln answers to besides PUBLIC_URL's, BIND_HOSTS and localhost (comma-separated).
+    extra_allowed_hosts: list[str] = field(default_factory=lambda: _list("ALLOWED_HOSTS", ""))
     # Behind `tailscale serve` (requests arrive from 127.0.0.1): take the client's address from
     # X-Forwarded-For and its Tailscale login from Tailscale-User-Login (Serve strips forged ones).
     trust_proxy: bool = _bool("TRUST_PROXY", False)
@@ -98,6 +100,9 @@ class Settings:
     max_sandbox_cpus: float = _float("MAX_SANDBOX_CPUS", 4)
     pids_limit: int = _int("SANDBOX_PIDS_LIMIT", 512)
     min_free_disk: int = _size("MIN_FREE_DISK", "15g")
+    # Below this much free disk, running sandboxes are stopped so a runaway agent can't fill
+    # the disk the rest of the server (Minecraft, ...) needs.
+    disk_emergency_free: int = _size("DISK_EMERGENCY_FREE", "5g")
     disk_path: str = os.getenv("DISK_CHECK_PATH", "/")
     # Kernel OOM killer picks sandboxes before anything else (rootless may only raise it).
     oom_score_adj: int = _int("SANDBOX_OOM_SCORE_ADJ", 800)
@@ -126,6 +131,9 @@ class Settings:
     run_max_turns_max: int = _int("RUN_MAX_TURNS_MAX", 500)
     run_max_events: int = _int("RUN_MAX_EVENTS", 20_000)  # per run; later output is dropped
     agent_model: str = os.getenv("AGENT_MODEL", "")  # empty = the CLI's default model
+    # "gateway" (default): agents get a per-run key, the token stays in the Claude gateway.
+    # "direct": the token itself goes into the sandbox (only if the gateway doesn't work for you).
+    claude_token_mode: str = os.getenv("CLAUDE_TOKEN_MODE", "gateway")
     git_author_name: str = os.getenv("AGENT_GIT_NAME", "Kiln")
     git_author_email: str = os.getenv("AGENT_GIT_EMAIL", "agent-hub@users.noreply.github.com")
 
@@ -146,6 +154,18 @@ class Settings:
     @property
     def https(self) -> bool:
         return self.public_url.startswith("https://")
+
+    def host_allowed(self, host: str) -> bool:
+        """Requests must name a host Kiln is meant to be reached at, so a web page can't reach it
+        through a hostname of its own that resolves here (DNS rebinding)."""
+        from urllib.parse import urlsplit
+
+        name = host.rsplit(":", 1)[0] if host.count(":") <= 1 else host.rsplit("]:", 1)[0] + "]"
+        name = name.strip("[]").lower().rstrip(".")
+        allowed = {"localhost", "127.0.0.1", "::1", *self.bind_hosts, *self.extra_allowed_hosts,
+                   self.preview_host, urlsplit(self.public_url).hostname or ""}
+        allowed = {h.strip("[]").lower().rstrip(".") for h in allowed if h}
+        return "0.0.0.0" in allowed or "::" in allowed or name in allowed
 
     @property
     def preview_ports(self) -> range:

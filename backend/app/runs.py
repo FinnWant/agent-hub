@@ -5,11 +5,16 @@
 One run per sandbox at a time. Every event is redacted, stored (up to RUN_MAX_EVENTS) and
 published to WebSocket subscribers. Whatever the outcome, the agent's work is committed to
 `agent/<run-id>` so it can be reviewed; only a successful run is pushed (if allowed).
+
+Agents run detached in their sandbox (see runners.py), so a run survives a Kiln restart: the
+runner state stored with the events says where to pick the output up again, and the owner can
+send messages to a running agent.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import threading
@@ -19,7 +24,8 @@ from typing import Any
 from . import config
 from .db import ACTIVE_RUN_STATES, Database, Run
 from .redact import Redactor
-from .runners import AgentRunner, RunProcess, RunSpec
+from .docker_backend import BackendError
+from .runners import MAX_MESSAGE, AgentRunner, RunError, RunProcess, RunSpec
 from .templates import TEMPLATES
 from .sandboxes import CapacityError, InvalidTransition, NotFound, SandboxError, SandboxService
 from .workspace import Workspace, WorkspaceError
@@ -59,17 +65,21 @@ class RunManager:
 
     # ---- events --------------------------------------------------------------
 
-    def emit(self, run: Run, event: dict[str, Any]) -> None:
+    def emit(self, run: Run, event: dict[str, Any], runner_state: dict[str, Any] | None = None) -> None:
+        """Store and publish an event; `runner_state` (if given) is stored with it atomically."""
         event = Redactor.from_settings().obj(event)
         seq = self._seq.get(run.id, 0)
         self._seq[run.id] = seq + 1
         ts = time.time()
         if seq < config.settings.run_max_events or event["type"] in ("status", "done", "cost"):
-            self.db.add_run_event(run.id, seq, ts, event)
+            self.db.add_run_event(run.id, seq, ts, event, runner_state)
         elif run.id not in self._dropped:
             self._dropped.add(run.id)
             self.db.add_run_event(run.id, seq, ts, {"type": "log", "kind": "system",
-                                                    "text": "Log limit reached; further output isn't stored."})
+                                                    "text": "Log limit reached; further output isn't stored."},
+                                  runner_state)
+        elif runner_state is not None:
+            self.db.add_run_event(run.id, seq, ts, None, runner_state)
         for q in list(self._subscribers.get(run.id, ())):
             q.put_nowait({"seq": seq, "ts": ts, **event})
 
@@ -137,6 +147,27 @@ class RunManager:
         task.add_done_callback(lambda _: self._tasks.pop(run.id, None))
         return task
 
+    def can_send(self, run_id: str) -> bool:
+        proc = self._procs.get(run_id)
+        return bool(proc is not None and getattr(proc, "can_send", False) and run_id not in self._cancel_reason)
+
+    async def send(self, run_id: str, text: str, ip: str) -> None:
+        """Deliver a message from the owner to a running agent."""
+        run = self.get(run_id)
+        text = text.strip()
+        if not text or len(text) > MAX_MESSAGE:
+            raise RunError(f"A message must be 1 to {MAX_MESSAGE} characters")
+        proc = self._procs.get(run_id)
+        if not run.active or proc is None or run_id in self._cancel_reason:
+            raise RunError("The run isn't running any more; start a new run instead")
+        if not hasattr(proc, "send"):
+            raise RunError("This agent can't take messages while it works")
+        self.db.audit(ip, "run.message", run.sandbox_id, detail={"run": run_id, "text": text[:200]})
+        try:
+            await proc.send(text)
+        except BackendError as e:
+            raise RunError(f"Couldn't deliver the message: {e}") from e
+
     async def cancel(self, run_id: str, ip: str, reason: str = "cancelled") -> Run:
         run = self.get(run_id)
         if not run.active:
@@ -159,45 +190,101 @@ class RunManager:
             except TimeoutError:
                 pass
 
-    def reconcile_on_startup(self) -> None:
-        """Runs that were active when Kiln stopped can't be followed any more: stop them."""
+    def reconcile_on_startup(self) -> list[tuple[Run, dict[str, Any]]]:
+        """Runs that were active when Kiln stopped: those whose agent is still running (or has
+        finished since) are returned with their runner state, to `resume()`. The rest can't be
+        followed any more: stop them and mark them failed."""
         from .runners import kill_argv
 
+        resumable: list[tuple[Run, dict[str, Any]]] = []
         for run in self.db.list_runs(states=ACTIVE_RUN_STATES, limit=1000):
             sb = self.db.get_sandbox(run.sandbox_id)
-            if sb and sb.container_id and sb.state == "running":
+            alive = bool(sb and sb.container_id and sb.state == "running")
+            if alive and (state := self._resumable(run, sb)) is not None:
+                resumable.append((run, state))
+                continue
+            if alive:
                 try:
                     self.sandboxes.backend.exec(sb.container_id, kill_argv(run.id), 30)
                 except Exception:  # noqa: BLE001
                     pass
             self.db.update_run(run, state="failed", error="Kiln restarted during the run",
                                finished_at=time.time())
+        return resumable
+
+    def _resumable(self, run: Run, sb) -> dict[str, Any] | None:
+        runner = self.runners.get(run.runner)
+        if run.state != "running" or not run.base_branch or not run.runner_state:
+            return None
+        if not (hasattr(runner, "attach") and hasattr(runner, "status")):
+            return None
+        try:
+            state = json.loads(run.runner_state)
+            status = runner.status(self._spec(run, sb))
+        except Exception:  # noqa: BLE001
+            log.warning("can't check run %s after the restart", run.id, exc_info=True)
+            return None
+        return state if isinstance(state, dict) and status in ("ALIVE", "DONE") else None
+
+    def resume(self, run: Run, state: dict[str, Any]) -> asyncio.Task:
+        task = asyncio.create_task(self._execute(run, resume=state))
+        self._tasks[run.id] = task
+        task.add_done_callback(lambda _: self._tasks.pop(run.id, None))
+        return task
 
     # ---- the run itself --------------------------------------------------------
 
-    async def _execute(self, run: Run) -> None:
-        sb = self.sandboxes.get(run.sandbox_id)
-        spec = RunSpec(run_id=run.id, container_id=sb.container_id or "", prompt=run.prompt,
+    @staticmethod
+    def _spec(run: Run, sb) -> RunSpec:
+        return RunSpec(run_id=run.id, container_id=sb.container_id or "", prompt=run.prompt,
                        timeout=run.timeout, max_turns=run.max_turns, branch=run.branch or "",
-                       preview_port=TEMPLATES[sb.template].preview_port)
+                       preview_port=TEMPLATES[sb.template].preview_port, sandbox_id=sb.id)
+
+    def _progress(self, run: Run, proc: RunProcess) -> dict[str, Any] | None:
+        state = proc.state() if hasattr(proc, "state") else None
+        if state and state.get("session_id") and state["session_id"] != run.session_id:
+            self.db.update_run(run, session_id=str(state["session_id"])[:100])
+        return state
+
+    async def _execute(self, run: Run, resume: dict[str, Any] | None = None) -> None:
+        sb = self.sandboxes.get(run.sandbox_id)
+        spec = self._spec(run, sb)
         state, error, outcome = "failed", None, None
-        self._status(run, "running", started_at=time.time())
+        runner = self.runners[run.runner]
+        if resume is None:
+            self._status(run, "running", started_at=time.time())
+            limit: float = run.timeout
+        else:  # Kiln restarted while the agent ran: pick up where the stored events end
+            self._seq[run.id] = self.db.last_run_seq(run.id) + 1
+            limit = max(1.0, run.timeout - (time.time() - (run.started_at or time.time())))
         try:
             if run.id in self._cancel_reason:
                 raise asyncio.CancelledError
-            base = await asyncio.to_thread(self.workspace.prepare, sb, run, lambda t: self._sys(run, t))
-            self.db.update_run(run, base_branch=base)
-            if not sb.base_branch:
-                self.db.update_sandbox(sb, base_branch=base)
+            if resume is None:
+                base = await asyncio.to_thread(self.workspace.prepare, sb, run, lambda t: self._sys(run, t))
+                self.db.update_run(run, base_branch=base)
+                if not sb.base_branch:
+                    self.db.update_sandbox(sb, base_branch=base)
+                proc = await runner.start(spec)
+            else:
+                try:
+                    proc = await runner.attach(spec, resume)
+                except Exception:
+                    from .runners import kill_argv  # don't leave an agent running unsupervised
 
-            proc = await self.runners[run.runner].start(spec)
+                    await asyncio.to_thread(self.sandboxes.backend.exec, spec.container_id, kill_argv(run.id), 30)
+                    raise
+                self._sys(run, "Kiln restarted; following the agent again")
             self._procs[run.id] = proc
+            if resume is None and hasattr(proc, "state"):  # where to re-attach from, before any output
+                self.db.update_run(run, runner_state=json.dumps(self._progress(run, proc)))
             if run.id in self._cancel_reason:
                 await proc.cancel()
             try:
-                async with asyncio.timeout(run.timeout):
+                async with asyncio.timeout(limit):
                     async for event in proc.events():
-                        self.emit(run, event)
+                        progress = event.pop("_progress", False)
+                        self.emit(run, event, self._progress(run, proc) if progress else None)
             except TimeoutError:
                 self._cancel_reason.setdefault(run.id, "timed_out")
                 self._sys(run, f"Time limit reached ({run.timeout // 60} min); stopping the agent")
@@ -216,13 +303,19 @@ class RunManager:
                                           if outcome.exit_code is not None else "Agent stopped unexpectedly")
         except asyncio.CancelledError:
             state = "cancelled"
-        except (WorkspaceError, SandboxError) as e:
+        except (WorkspaceError, SandboxError, BackendError) as e:
             error = str(e)
         except Exception as e:  # noqa: BLE001  (keep the run record honest whatever happened)
             log.exception("run %s crashed", run.id)
             error = f"Internal error: {e}"
         finally:
             self._procs.pop(run.id, None)
+            release = getattr(self.runners.get(run.runner), "release", None)
+            if release:
+                try:
+                    await release(run.id, sb.container_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("releasing run %s failed", run.id)
 
         commit = None
         pushed = False

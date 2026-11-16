@@ -5,23 +5,22 @@ to /workspace and sizes are capped. Content is returned as data for the UI to re
 
 from __future__ import annotations
 
+import os
 import posixpath
 import re
+import tempfile
 from typing import Any
 
 from .db import Run, Sandbox
 from .docker_backend import Backend, BackendError, WORKDIR
 from .sandboxes import SandboxError
+from .workspace import WorkspaceError, export_branch, host_git
 
 MAX_FILE = 512 * 1024
 MAX_DIFF = 4 * 2**20
 MAX_ENTRIES = 2000
 REF_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]{0,199}$")
 TYPES = {"d": "dir", "f": "file", "l": "link"}
-
-# Git in the sandbox, with everything that could run repo-provided programs switched off.
-GIT = ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.quotepath=off",
-       "--no-pager"]
 
 
 class PathError(SandboxError):
@@ -90,42 +89,44 @@ def browse(backend: Backend, sb: Sandbox, path: str) -> dict[str, Any]:
     return {**base, "content": data.decode("utf-8", errors="replace")}
 
 
-GIT_SH = " ".join(GIT)
-NUMSTAT_SCRIPT = GIT_SH + ' diff --no-ext-diff --no-textconv -M --numstat "$AH_RANGE" --'
-DIFF_SCRIPT = (f'{GIT_SH} diff --no-color --no-ext-diff --no-textconv -M "$AH_RANGE" -- > "$AH_OUT" && '
-               'wc -c < "$AH_OUT"')
-
-
 def run_diff(backend: Backend, sb: Sandbox, run: Run) -> dict[str, Any]:
-    """The run's branch against the point where it left its base branch."""
+    """The run's branch against the point where it left its base branch.
+
+    Computed on the host from a bundle of the two branches, the same export a push uses, with
+    the host's own git in a fresh repository. So the agent can't change what you see: a fake
+    `git` in the sandbox, `.gitattributes`/`info/attributes` marking files as binary, textconv
+    filters or replace refs make no difference here."""
     if not (run.branch and run.base_branch):
         raise SandboxError("This run didn't get as far as creating its branch")
     if not (REF_RE.fullmatch(run.branch) and REF_RE.fullmatch(run.base_branch)):
         raise SandboxError("Unexpected branch name")
-    env = {"AH_RANGE": f"{run.base_branch}...{run.branch}", "AH_OUT": f"/tmp/ah-diff-{run.id}.patch"}
-    try:
-        stat = _exec(backend, sb, ["bash", "-c", NUMSTAT_SCRIPT], env)
-    except SandboxError as e:
-        if "unknown revision" in str(e) or "bad revision" in str(e):
-            raise SandboxError(f"Branch {run.branch} no longer exists in this sandbox") from e
-        raise
-    files = []
-    for line in stat.splitlines():
-        parts = line.split("\t", 2)
-        if len(parts) == 3:
-            add, rem, name = parts
-            files.append({"path": name, "added": None if add == "-" else int(add),
-                          "removed": None if rem == "-" else int(rem)})
-    size = int(_exec(backend, sb, ["bash", "-c", DIFF_SCRIPT], env).strip() or 0)
-    result: dict[str, Any] = {"run": run.id, "base": run.base_branch, "branch": run.branch,
-                              "files": files, "size": size}
-    if size > MAX_DIFF:
-        result["too_large"] = True
-    else:
+    base, branch = f"refs/heads/{run.base_branch}", f"refs/heads/{run.branch}"
+    with tempfile.TemporaryDirectory(prefix="ah-diff-") as tmp:
         try:
-            patch = backend.get_file(sb.container_id or "", env["AH_OUT"], MAX_DIFF) if size else b""
-        except BackendError as e:
+            repo = export_branch(backend, sb, run.branch, run.base_branch, tmp)
+            refs = host_git(["for-each-ref", "--format=%(refname)"], home=tmp, cwd=repo).split()
+            if base not in refs:
+                raise SandboxError(f"Base branch {run.base_branch} no longer exists in this sandbox")
+            git = ["-c", "core.quotepath=off", "-c", "diff.noprefix=false", "diff", "--no-ext-diff",
+                   "--no-textconv", "-M"]
+            stat = host_git([*git, "--numstat", f"{base}...{branch}", "--"], home=tmp, cwd=repo)
+            patch_file = f"{tmp}/run.patch"
+            host_git([*git, "--no-color", f"--output={patch_file}", f"{base}...{branch}", "--"], home=tmp, cwd=repo)
+        except (WorkspaceError, BackendError) as e:
             raise SandboxError(str(e)) from e
-        result["patch"] = patch.decode("utf-8", errors="replace")
-    _exec(backend, sb, ["rm", "-f", env["AH_OUT"]])
+        files = []
+        for line in stat.splitlines():
+            parts = line.split("\t", 2)
+            if len(parts) == 3:
+                add, rem, name = parts
+                files.append({"path": name, "added": None if add == "-" else int(add),
+                              "removed": None if rem == "-" else int(rem)})
+        size = os.path.getsize(patch_file)
+        result: dict[str, Any] = {"run": run.id, "base": run.base_branch, "branch": run.branch,
+                                  "files": files, "size": size}
+        if size > MAX_DIFF:
+            result["too_large"] = True
+        else:
+            with open(patch_file, "rb") as f:
+                result["patch"] = f.read().decode("utf-8", errors="replace")
     return result

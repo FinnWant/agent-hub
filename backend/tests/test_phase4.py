@@ -47,6 +47,11 @@ class MappedBackend:
         assert len(data) <= max_size
         return data
 
+    def get_file_to(self, container_id, path, dest, max_size):
+        data = self.get_file(container_id, path, max_size)
+        Path(dest).write_bytes(data)
+        return len(data)
+
 
 @pytest.fixture
 def box(tmp_path):
@@ -119,11 +124,54 @@ def test_run_diff(box):
     assert set(by) == {"README.md", "old.txt", "img.bin"}  # three-dot: main's later commit excluded
     assert by["README.md"]["added"] == 3 and by["old.txt"]["removed"] == 1 and by["img.bin"]["added"] is None
     assert "+## About" in d["patch"] and "later-on-main" not in d["patch"]
+    # The agent can't hide changes from review: attributes in its repo don't apply.
+    (box.ws / ".git" / "info").mkdir(exist_ok=True)
+    (box.ws / ".git" / "info" / "attributes").write_text("*.md -diff\n")
+    assert "+## About" in files.run_diff(box, sandbox(), run)["patch"]
     assert not list((box.root / "tmp").iterdir())  # temp patch cleaned up
     with pytest.raises(Exception, match="no longer exists"):
         files.run_diff(box, sandbox(), dataclasses.replace(run, branch="agent/ffffffffffff"))
     with pytest.raises(Exception, match="Unexpected"):
         files.run_diff(box, sandbox(), dataclasses.replace(run, base_branch="--output=/etc/x"))
+
+
+def test_python_preview_server_hides_dotfiles(tmp_path):
+    import socket
+    import sys
+    import time
+    import urllib.request
+    from urllib.error import HTTPError
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("secret")
+    (tmp_path / ".env").write_text("K=1")
+    (tmp_path / "index.html").write_text("hi")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "page.txt").write_text("p")
+    (tmp_path / "docs" / ".secret").write_text("s")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    script = preview.PY_SERVER.replace('"/workspace"', repr(str(tmp_path)))
+    proc = subprocess.Popen([sys.executable, "-I", "-c", script, str(port)])
+    try:
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.05)
+        get = lambda p: urllib.request.urlopen(f"http://127.0.0.1:{port}{p}", timeout=5).read().decode()
+        assert get("/index.html") == "hi"
+        listing = get("/docs/")
+        assert "page.txt" in listing and ".secret" not in listing
+        for p in ("/.git/config", "/.env", "/%2egit/config", "/x/../.git/config", "/docs/.secret"):
+            with pytest.raises(HTTPError) as e:
+                get(p)
+            assert e.value.code == 404, p
+    finally:
+        proc.terminate()
+        proc.wait(5)
 
 
 def test_files_api_requires_running_sandbox(admin, backend):
@@ -151,7 +199,7 @@ def test_static_server_commands_match_their_stop_pattern():
     for template in ("python", "node", "static"):
         cmd = preview.server_cmd(template, 8000)
         assert re.search(preview.server_pattern(8000), cmd + " "), template
-        assert "0.0.0.0" in cmd and "/workspace" in cmd
+        assert ("0.0.0.0" in cmd and "/workspace" in cmd) or cmd.startswith("python3 -I /tmp/kiln-preview.py")
         assert not re.search(preview.server_pattern(8000), " ".join(preview.stop_argv(8000)))  # never itself
 
 
@@ -223,7 +271,7 @@ def test_preview_status_and_static_server(admin, backend, previews):
                   "listening": "any", "static_server": False, "has_index": True, "lists_directories": True}
     assert admin.post(f"/api/sandboxes/{sb['id']}/preview/static", headers=CSRF).status_code == 200
     started = [" ".join(c) for c, _ in backend.exec_calls if "setsid -f" in " ".join(c)]
-    assert started and "python3 -m http.server 8000 --bind 0.0.0.0 --directory /workspace" in started[0]
+    assert started and "setsid -f python3 -I /tmp/kiln-preview.py 8000" in started[0]
     assert admin.delete(f"/api/sandboxes/{sb['id']}/preview/static", headers=CSRF).status_code == 200
     assert {a["action"] for a in admin.get("/api/audit").json()} >= {"preview.start", "preview.stop"}
 
@@ -250,6 +298,20 @@ def test_monitor_reports_memory_and_workspace_size(admin, svc, backend):
     got = admin.get(f"/api/sandboxes/{sb['id']}").json()
     assert got["memory_usage"] == 300 * 2**20 and got["workspace_bytes"] == 123456
     assert admin.post(f"/api/sandboxes/{sb['id']}/measure", headers=CSRF).json() == {"workspace_bytes": 123456}
+
+
+def test_low_disk_stops_running_sandboxes_and_notifies(admin, svc, host):
+    a = admin.post("/api/sandboxes", json={"name": "a", "template": "python", "memory": "512m"}, headers=CSRF).json()
+    problems = []
+    svc.on_problem = lambda sb, why: problems.append((sb.id, why))
+    mon = Monitor(svc)
+    assert mon.guard_disk() == []  # plenty of disk: nothing happens
+    host.free_disk = 3 * GIB       # below DISK_EMERGENCY_FREE (5 GB)
+    assert mon.guard_disk() == [a["id"]]
+    got = admin.get(f"/api/sandboxes/{a['id']}").json()
+    assert got["state"] == "stopped" and "disk" in got["error"]
+    assert problems and problems[0][0] == a["id"] and "3.0 GB" in problems[0][1]
+    assert any(e["action"] == "disk.emergency_stop" for e in admin.get("/api/audit").json())
 
 
 def test_prune_never_touches_live_sandboxes_or_foreign_containers(admin, backend):

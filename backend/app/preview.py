@@ -47,12 +47,51 @@ def preview_url(sb: Sandbox) -> str | None:
     return f"http://{s.preview_host.rstrip('.')}:{sb.preview_port}/"
 
 
+# Python's file server, but dotfiles and dot folders (.git, .env, ...) are neither listed nor
+# served: preview ports are open to your whole tailnet.
+PY_SERVER = r"""
+import http.server, os, sys
+from urllib.parse import unquote, urlsplit
+
+class H(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *a, **k):
+        super().__init__(*a, directory="/workspace", **k)
+
+    def send_head(self):
+        if any(p.startswith(".") for p in unquote(urlsplit(self.path).path).split("/")):
+            self.send_error(404)
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        real = os.listdir
+        os.listdir = lambda d: [n for n in real(d) if not n.startswith(".")]
+        try:
+            return super().list_directory(path)
+        finally:
+            os.listdir = real
+
+http.server.ThreadingHTTPServer(("0.0.0.0", int(sys.argv[1])), H).serve_forever()
+"""
+PY_SERVER_FILE = "/tmp/kiln-preview.py"
+# busybox httpd can't hide single files, but can put a password nobody knows on /.git.
+HTTPD_CONF = "/tmp/kiln-httpd.conf"
+
+
 def server_cmd(template: str, port: int) -> str:
     """The one-click static server: Python's (lists directories) where Python exists, else
     busybox httpd (serves files by path only)."""
     if template == "python":
-        return f"python3 -m http.server {port} --bind 0.0.0.0 --directory /workspace"
-    return f"busybox httpd -f -p 0.0.0.0:{port} -h /workspace"
+        return f"python3 -I {PY_SERVER_FILE} {port}"
+    return f"busybox httpd -f -p 0.0.0.0:{port} -h /workspace -c {HTTPD_CONF}"
+
+
+def setup_script(template: str) -> str:
+    import base64
+
+    if template == "python":
+        return f"echo {base64.b64encode(PY_SERVER.encode()).decode()} | base64 -d > {PY_SERVER_FILE}"
+    return f'printf "/.git:kiln:%s\\n" "$(head -c 24 /dev/urandom | base64)" > {HTTPD_CONF}'
 
 
 def lists_directories(template: str) -> bool:
@@ -61,11 +100,11 @@ def lists_directories(template: str) -> bool:
 
 def server_pattern(port: int) -> str:
     # Anchored, so it never matches the shell that runs pgrep/pkill itself.
-    return f"^(busybox httpd -f -p 0.0.0.0:{port} |python3 -m http.server {port} )"
+    return f"^(busybox httpd -f -p 0.0.0.0:{port} |python3 -I {PY_SERVER_FILE} {port}( |$))"
 
 
 def server_argv(template: str, port: int) -> list[str]:
-    return ["bash", "-c", f"setsid -f {server_cmd(template, port)} >/dev/null 2>&1 </dev/null"]
+    return ["bash", "-c", f"set -e; {setup_script(template)}; setsid -f {server_cmd(template, port)} >/dev/null 2>&1 </dev/null"]
 
 
 def stop_argv(port: int) -> list[str]:

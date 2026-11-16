@@ -6,7 +6,7 @@ import dataclasses
 
 from app import config
 from app.db import Sandbox
-from app.docker_backend import WORKDIR, container_spec, exec_argv
+from app.docker_backend import WORKDIR, container_spec, exec_argv, exec_env
 from app.templates import TEMPLATES
 from tests.conftest import GIB
 
@@ -47,7 +47,7 @@ def test_resource_limits(settings):
 
 def test_network_and_labels(settings):
     s = spec()
-    assert s["network"] == "agent-sandboxes"
+    assert s["network"] == "kiln-sb-abc123def456"  # its own network: sandboxes can't reach each other
     assert s["labels"] == {"agent-hub.managed": "true", "agent-hub.sandbox-id": "abc123def456"}
     assert "ports" not in s  # nothing published in phase 1
 
@@ -62,5 +62,12 @@ def test_io_limits_and_runtime_are_config(settings):
 
 
 def test_exec_is_wrapped_in_timeout():
-    assert exec_argv("echo hi", 30) == ["timeout", "-k", "5", "30", "bash", "-lc", "echo hi"]
-    assert exec_argv(["python3", "-V"], 5) == ["timeout", "-k", "5", "5", "python3", "-V"]
+    assert exec_argv("echo hi", 30) == ["/usr/bin/timeout", "-k", "5", "30", "bash", "-lc", "echo hi"]
+    assert exec_argv(["python3", "-V"], 5) == ["/usr/bin/timeout", "-k", "5", "5", "python3", "-V"]
+
+
+def test_kilns_own_commands_ignore_the_agents_path():
+    # The agent controls /home/agent/.local/bin (first in the image's PATH), so Kiln's own
+    # commands (lists) only look in system directories; your typed commands (strings) don't change.
+    assert exec_env(["git", "diff"], {"A": "1"}) == {"PATH": "/usr/local/bin:/usr/bin:/bin", "A": "1"}
+    assert exec_env("ls", None) is None

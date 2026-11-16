@@ -26,10 +26,24 @@ PATTERNS = [
 ]
 
 
+def _base64_cores(data: bytes) -> set[str]:
+    """The part of base64(... + data + ...) that doesn't depend on the surrounding bytes, for
+    each of the three alignments data can start at (standard and URL-safe alphabets)."""
+    out = set()
+    for k in range(3):
+        enc = base64.b64encode(b"\0" * k + data).decode().rstrip("=")
+        start = -(-k * 4 // 3)          # characters touched by the k prefix bytes
+        core = enc[start + (1 if k else 0):len(enc) - 4]  # drop the boundary characters
+        if len(core) >= 16:
+            out |= {core, core.replace("+", "-").replace("/", "_")}
+    return out
+
+
 def _variants(secret: str) -> set[str]:
     out = {secret, quote(secret, safe="")}
     for user in ("x-access-token", "git", "oauth2", ""):
         out.add(base64.b64encode(f"{user}:{secret}".encode()).decode())
+    out |= _base64_cores(secret.encode())  # the secret base64-encoded on its own or inside other data
     return {v for v in out if len(v) >= MIN_SECRET_LEN}
 
 

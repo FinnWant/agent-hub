@@ -7,6 +7,8 @@ git bundles:
     clone:  host `git clone --bare` (token) -> bundle -> copied in -> `git clone` from the bundle
     push:   `git bundle` of agent/<run-id> in the sandbox -> copied out -> fetched into a fresh
             host repo -> `git push` (token) of exactly that branch, never forced
+    review: the same export, and the diff is computed on the host from it (files.run_diff), so
+            what you review is exactly what gets pushed, whatever the agent did to git in the sandbox
 
 So nothing the agent writes (hooks, `.git/config`, credential helpers, `insteadOf` rewrites)
 is ever executed or read by a git process that holds the token.
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -28,10 +31,9 @@ from .db import Run, Sandbox
 from .docker_backend import Backend, BackendError
 
 BRANCH_RE = re.compile(r"^agent/[0-9a-f]{12}$")
-MAX_BUNDLE = 2 * 2**30
+MAX_BUNDLE = 2**30
 HOST_GIT_TIMEOUT = 600
 IN_BUNDLE = "/tmp/ah-repo.bundle"
-OUT_BUNDLE = "/tmp/ah-push.bundle"
 
 # Credential helper for host git: answers only for github.com, with the token from the env.
 CRED_HELPER = ('!f() { test "$1" = get || exit 0; ok=; while read -r l; do '
@@ -113,14 +115,67 @@ echo "$made $(git rev-parse "$AH_BRANCH") $(git rev-list --count "$AH_BASE..$AH_
 DEFAULT_BRANCH_SCRIPT = """b=$(git symbolic-ref --short -q refs/remotes/origin/HEAD) && echo "${b#origin/}" && exit 0
 git symbolic-ref --short HEAD"""
 
-BUNDLE_SCRIPT = 'set -e; rm -f {out}; git bundle create -q {out} "refs/heads/$AH_BRANCH"'
+# The run branch, plus its base branch if asked for and still there. Run with the system git
+# (Kiln's commands use a PATH of system directories only) and without replace objects.
+EXPORT_SCRIPT = """set -e
+rm -f "$AH_OUT"
+git rev-parse -q --verify "refs/heads/$AH_BRANCH" >/dev/null || { echo NOBRANCH; exit 3; }
+refs="refs/heads/$AH_BRANCH"
+if [ -n "$AH_BASE" ] && git rev-parse -q --verify "refs/heads/$AH_BASE" >/dev/null; then
+  refs="$refs refs/heads/$AH_BASE"
+fi
+git bundle create -q "$AH_OUT" $refs
+"""
+
+
+def host_git(args: list[str], home: str, cwd: str | None = None, token: bool = False) -> str:
+    """git on the host, with no system/global config, no hooks, and the GitHub token only when
+    asked for (it's then offered to github.com only)."""
+    env = {"PATH": "/usr/bin:/bin", "HOME": home, "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+           "LANG": "C.UTF-8"}
+    if token and config.settings.github_token:
+        env["AH_GITHUB_TOKEN"] = config.settings.github_token
+    cmd = ["git", "-c", "credential.helper=", "-c", f"credential.helper={CRED_HELPER}",
+           "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
+           "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=always", *args]
+    try:
+        r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=HOST_GIT_TIMEOUT)
+    except subprocess.TimeoutExpired as e:
+        raise WorkspaceError(f"git {args[0]} timed out") from e
+    if r.returncode != 0:
+        raise WorkspaceError(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-400:]}")
+    return r.stdout
+
+
+def export_branch(backend: Backend, sb: Sandbox, branch: str, base: str | None, tmp: str) -> str:
+    """Copy `branch` (and `base`, if given and present) out of the sandbox as a git bundle,
+    streamed to disk, and fetch it into a fresh bare repository under `tmp`. Returns its path."""
+    out = f"/tmp/ah-export-{secrets.token_hex(6)}.bundle"
+    env = {"AH_OUT": out, "AH_BRANCH": branch, "AH_BASE": base or "", "GIT_NO_REPLACE_OBJECTS": "1"}
+    cid = sb.container_id or ""
+    r = backend.exec(cid, ["bash", "-c", EXPORT_SCRIPT], 600, env)
+    try:
+        if r.exit_code != 0:
+            if "NOBRANCH" in r.output:
+                raise WorkspaceError(f"Branch {branch} no longer exists in this sandbox")
+            raise WorkspaceError(r.output.strip()[-400:] or "git bundle failed")
+        backend.get_file_to(cid, out, f"{tmp}/out.bundle", MAX_BUNDLE)
+    finally:
+        try:
+            backend.exec(cid, ["rm", "-f", out], 30)
+        except BackendError:
+            pass
+    repo = f"{tmp}/repo.git"
+    host_git(["init", "--quiet", "--bare", repo], home=tmp)
+    host_git(["fetch", "--quiet", "--no-tags", f"{tmp}/out.bundle", "refs/heads/*:refs/heads/*"], home=tmp, cwd=repo)
+    return repo
 
 
 class GitWorkspace:
-    def __init__(self, backend: Backend, in_bundle: str = IN_BUNDLE, out_bundle: str = OUT_BUNDLE) -> None:
+    def __init__(self, backend: Backend, in_bundle: str = IN_BUNDLE) -> None:
         self.backend = backend
         self.in_bundle = in_bundle
-        self.out_bundle = out_bundle
 
     # ---- in the sandbox ------------------------------------------------------
 
@@ -187,30 +242,22 @@ class GitWorkspace:
             return False
         if not BRANCH_RE.fullmatch(branch):  # never main/master or anything else
             raise WorkspaceError(f"Refusing to push unexpected branch {branch!r}")
-        self._sh(sb, BUNDLE_SCRIPT.format(out=self.out_bundle), {"AH_BRANCH": branch})
-        bundle = self.backend.get_file(sb.container_id or "", self.out_bundle, MAX_BUNDLE)
-        log(f"Pushing {branch} to {sb.repo_url}")
-        self._host_push(sb.repo_url, branch, bundle)
+        with tempfile.TemporaryDirectory(prefix="ah-push-") as tmp:
+            try:
+                repo = export_branch(self.backend, sb, branch, None, tmp)
+            except BackendError as e:
+                raise WorkspaceError(str(e)) from e
+            log(f"Pushing {branch} to {sb.repo_url}")
+            ref = f"refs/heads/{branch}"
+            # Exactly one branch, no force, explicit URL (no remotes or config from the sandbox).
+            self._git(["push", "--quiet", "--no-verify", sb.repo_url, f"{ref}:{ref}"], home=tmp, cwd=repo)
         log(f"Pushed {branch}")
         return True
 
     # ---- on the host ----------------------------------------------------------
 
     def _git(self, args: list[str], home: str, cwd: str | None = None) -> str:
-        env = {"PATH": "/usr/bin:/bin", "HOME": home, "GIT_CONFIG_NOSYSTEM": "1",
-               "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0", "LANG": "C.UTF-8"}
-        if config.settings.github_token:
-            env["AH_GITHUB_TOKEN"] = config.settings.github_token
-        cmd = ["git", "-c", "credential.helper=", "-c", f"credential.helper={CRED_HELPER}",
-               "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
-               "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=always", *args]
-        try:
-            r = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=HOST_GIT_TIMEOUT)
-        except subprocess.TimeoutExpired as e:
-            raise WorkspaceError(f"git {args[0]} timed out") from e
-        if r.returncode != 0:
-            raise WorkspaceError(f"git {args[0]} failed: {(r.stderr or r.stdout).strip()[-400:]}")
-        return r.stdout
+        return host_git(args, home, cwd, token=True)
 
     def _host_clone_bundle(self, url: str) -> bytes:
         with tempfile.TemporaryDirectory(prefix="ah-clone-") as tmp:
@@ -218,18 +265,8 @@ class GitWorkspace:
             self._git(["bundle", "create", "--quiet", f"{tmp}/repo.bundle", "--all"], home=tmp, cwd=f"{tmp}/repo.git")
             path = Path(f"{tmp}/repo.bundle")
             if path.stat().st_size > MAX_BUNDLE:
-                raise WorkspaceError("Repository is larger than 2 GB")
+                raise WorkspaceError("Repository is larger than 1 GB")
             return path.read_bytes()
-
-    def _host_push(self, url: str, branch: str, bundle: bytes) -> None:
-        with tempfile.TemporaryDirectory(prefix="ah-push-") as tmp:
-            repo = f"{tmp}/repo.git"
-            Path(f"{tmp}/out.bundle").write_bytes(bundle)
-            self._git(["init", "--quiet", "--bare", repo], home=tmp)
-            ref = f"refs/heads/{branch}"
-            self._git(["fetch", "--quiet", f"{tmp}/out.bundle", f"{ref}:{ref}"], home=tmp, cwd=repo)
-            # Exactly one branch, no force, explicit URL (no remotes or config from the sandbox).
-            self._git(["push", "--quiet", "--no-verify", url, f"{ref}:{ref}"], home=tmp, cwd=repo)
 
 
 class FakeWorkspace:

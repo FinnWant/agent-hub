@@ -45,10 +45,13 @@ export interface Run {
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+  session_id: string | null;
+  /** The agent is running and reads messages (see `api.sendRunMessage`). */
+  can_message: boolean;
 }
 
 export type RunEvent = { seq: number; ts: number } & (
-  | { type: "log"; kind: "text" | "tool" | "tool_result" | "system" | "stderr" | "stdout" | "result" | "error";
+  | { type: "log"; kind: "text" | "tool" | "tool_result" | "system" | "stderr" | "stdout" | "result" | "error" | "user";
       text: string; name?: string; is_error?: boolean }
   | { type: "status"; state: RunState }
   | { type: "cost"; cost_usd: number | null; turns: number | null; duration_ms: number | null }
@@ -255,6 +258,8 @@ export const api = {
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),
+  sendRunMessage: (id: string, text: string) =>
+    request<{ ok: boolean }>("POST", `/runs/${encodeURIComponent(id)}/messages`, { text }),
   files: (id: string, path: string) =>
     request<Browse>("GET", `/sandboxes/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path)}`),
   runDiff: (runId: string) => request<RunDiff>("GET", `/runs/${encodeURIComponent(runId)}/diff`),

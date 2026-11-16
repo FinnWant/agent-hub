@@ -1,5 +1,5 @@
 [Unit]
-Description=Agent Hub sandbox egress filter (iptables, owner match on agenthub)
+Description=Kiln sandbox egress filter (iptables, owner match on agenthub)
 Documentation=https://github.com/FinnWant/agent-hub
 # Apply before agenthub's user manager starts its rootless Docker, and after ufw sets up.
 After=network-pre.target ufw.service

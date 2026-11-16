@@ -102,3 +102,51 @@ def untar_one(stream: bytes, max_size: int) -> bytes:
         f = tar.extractfile(member)
         assert f is not None
         return f.read()
+
+
+class _ChunkReader(io.RawIOBase):
+    """File-like view of an iterator of byte chunks, failing once more than `limit` bytes arrive."""
+
+    def __init__(self, chunks, limit: int) -> None:
+        self._it = iter(chunks)
+        self._buf = b""
+        self._seen = 0
+        self._limit = limit
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        while not self._buf:
+            try:
+                self._buf = next(self._it)
+            except StopIteration:
+                return 0
+            self._seen += len(self._buf)
+            if self._seen > self._limit:
+                raise ValueError(f"archive is larger than {self._limit} bytes")
+        n = min(len(b), len(self._buf))
+        b[:n], self._buf = self._buf[:n], self._buf[n:]
+        return n
+
+
+def untar_stream_to(chunks, dest: str, max_size: int) -> int:
+    """Write the first regular file of a streamed tar archive to `dest` (created with mode 600),
+    without holding it in memory. Returns its size."""
+    import os
+
+    raw = io.BufferedReader(_ChunkReader(chunks, max_size + 2**20), 2**16)  # + tar headers/padding
+    with tarfile.open(fileobj=raw, mode="r|") as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            if member.size > max_size:
+                raise ValueError(f"file is larger than {max_size} bytes")
+            src = tar.extractfile(member)
+            assert src is not None
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                while block := src.read(2**16):
+                    out.write(block)
+            return member.size
+    raise ValueError("archive has no regular file")

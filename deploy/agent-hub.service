@@ -1,9 +1,9 @@
 [Unit]
-Description=Agent Hub (sandboxed coding agents)
+Description=Kiln (sandboxed coding agents)
 Documentation=https://github.com/FinnWant/agent-hub
 After=network-online.target user@AGENT_UID.service agent-hub-egress.service
 Wants=network-online.target
-# Fail closed: no egress filter (or no rootless Docker) means no Agent Hub.
+# Fail closed: no egress filter (or no rootless Docker) means no Kiln.
 Requires=user@AGENT_UID.service agent-hub-egress.service
 
 [Service]
@@ -39,6 +39,10 @@ RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
 UMask=0077
+# Kiln itself needs a few hundred MB; a cap keeps a bug or a huge transfer from starving the
+# rest of the server. (Sandboxes have their own limits; they run under the Docker daemon.)
+MemoryMax=1G
+TasksMax=512
 
 [Install]
 WantedBy=multi-user.target

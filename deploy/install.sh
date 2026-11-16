@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install or update Agent Hub on an Ubuntu server.
+# Install or update Kiln on an Ubuntu server.
 # Usage: sudo bash deploy/install.sh
 #
 # Prerequisites (see README): a system user `agenthub` with rootless Docker set up and
@@ -30,8 +30,8 @@ apt-get install -y -qq python3-venv rsync iptables >/dev/null
 echo "==> Copying app to $APP_DIR"
 install -d -m 755 "$APP_DIR"
 install -d -m 700 "$APP_DIR/data"
-rsync -a --delete \
-  --exclude .git --exclude .venv --exclude data --exclude .env --exclude AGENT_HUB_HANDOFF.md \
+rsync -a --delete --chown=root:root \
+  --exclude .git --exclude .venv --exclude data --exclude .env --exclude .build --exclude AGENT_HUB_HANDOFF.md \
   --exclude node_modules --exclude dist --exclude __pycache__ --exclude .pytest_cache \
   "$SRC_DIR/" "$APP_DIR/"
 
@@ -56,7 +56,7 @@ if [[ $(env_get BIND_HOSTS) == *"<tailscale-ip>"* || -z $(env_get BIND_HOSTS) ]]
   env_set BIND_HOSTS "127.0.0.1,$TS_IP"
 fi
 # Previews: published on the Tailscale IP only, linked by the MagicDNS name (a different
-# hostname from the one you open Agent Hub on, so previews never see its session cookie).
+# hostname from the one you open Kiln on, so previews never see its session cookie).
 if [[ -z $(env_get PREVIEW_BIND) || $(env_get PREVIEW_BIND) == *"<"* ]]; then
   env_set PREVIEW_BIND "$(env_get BIND_HOSTS | tr ',' '\n' | grep -v '^127\.' | head -1)"
 fi
@@ -72,19 +72,41 @@ if [[ -z $(env_get SANDBOX_IO_DEVICE) ]] \
 fi
 
 echo "==> Creating Python environment"
+# The venv is root's (this script runs its pip as root). One made by an older version of this
+# script belonged to $SERVICE_USER, who could have changed it: start that one over.
+if [[ -d $APP_DIR/.venv ]] && find "$APP_DIR/.venv" ! -user root -print -quit | grep -q .; then
+  rm -rf "$APP_DIR/.venv"
+fi
 [[ -x $APP_DIR/.venv/bin/python ]] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/backend/requirements.txt"
+"$APP_DIR/.venv/bin/pip" install -q -r "$APP_DIR/backend/requirements-dev.txt"  # app + pytest for the checks
 
-chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR"
+# Program files belong to root: Kiln's account (which also runs the sandboxes' Docker daemon)
+# can read them but not change them, so a sandbox escape can't plant code that this script or
+# the service runs later. Kiln's account owns only its data, its settings and a build folder.
+BUILD_DIR=$APP_DIR/.build
+rm -rf "$APP_DIR/frontend/node_modules"  # from older installs; the UI is built in $BUILD_DIR now
+KEEP=( \( -path "$APP_DIR/data" -o -path "$ENV_FILE" -o -path "$BUILD_DIR" \) -prune -o )
+find "$APP_DIR" "${KEEP[@]}" -exec chown -h root:root {} +
+find "$APP_DIR" "${KEEP[@]}" ! -type l -exec chmod u+rwX,go+rX,go-w {} +
+install -d -m 700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$BUILD_DIR"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$APP_DIR/data" "$BUILD_DIR"
+chown "$SERVICE_USER:$SERVICE_USER" "$ENV_FILE"
+chmod 700 "$APP_DIR/data"
 chmod 600 "$ENV_FILE"
+"$APP_DIR/.venv/bin/python" -m compileall -q "$APP_DIR/backend/app" >/dev/null || true  # the service can't write __pycache__
+# Nobody logs in as the service account; sudo -u still works for the commands below.
+usermod -s /usr/sbin/nologin "$SERVICE_USER"
 
 echo "==> Building the web UI"
 command -v npm >/dev/null || die "Node.js (20.19+ or 22.12+) with npm is needed to build the web UI"
 node -e 'const [a,b]=process.versions.node.split(".").map(Number); process.exit(a>22||(a===22&&b>=12)||(a===20&&b>=19)||a===21?0:1)' \
   || die "Node.js $(node --version) is too old for the web UI build (need 20.19+ or 22.12+)"
-# As agenthub, with dependency install scripts disabled; versions are pinned by package-lock.json.
-as_agent bash -c "cd '$APP_DIR/frontend' && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null && npm run -s build >/dev/null"
+# As agenthub in its build folder, with dependency install scripts disabled (versions pinned by
+# package-lock.json); then root copies the result into the root-owned app folder.
+as_agent rsync -a --delete --exclude node_modules --exclude dist "$APP_DIR/frontend/" "$BUILD_DIR/frontend/"
+as_agent bash -c "cd '$BUILD_DIR/frontend' && npm ci --ignore-scripts --no-audit --no-fund --loglevel=error >/dev/null && npm run -s build >/dev/null"
+rsync -a --delete --safe-links --chown=root:root "$BUILD_DIR/frontend/dist/" "$APP_DIR/frontend/dist/"
 
 echo "==> Applying the sandbox egress filter"
 # Runs as root, so it lives in a root-owned path agenthub can't modify.
@@ -107,16 +129,16 @@ TS_IP=$(tailscale ip -4 2>/dev/null | head -1 || true)
 TS_NAME=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
 
 # HTTPS through `tailscale serve` (set HTTPS=off in .env to skip): Tailscale terminates TLS with
-# a real certificate for the MagicDNS name and forwards to Agent Hub on 127.0.0.1. Agent Hub
+# a real certificate for the MagicDNS name and forwards to Kiln on 127.0.0.1. Kiln
 # then listens on localhost only, and previews move to the plain Tailscale IP (a different
 # host, so they never get the session cookie).
 HTTPS_OK=0
 if [[ $(env_get HTTPS) != off && -n $TS_NAME && -n $TS_IP ]]; then
-  echo "==> Serving Agent Hub over HTTPS at https://$TS_NAME (tailscale serve)"
+  echo "==> Serving Kiln over HTTPS at https://$TS_NAME (tailscale serve)"
   if out=$(timeout 60 tailscale serve --bg --https=443 "http://127.0.0.1:$PORT" 2>&1); then
     HTTPS_OK=1
   else
-    echo "    tailscale serve didn't succeed, so Agent Hub stays on plain HTTP for now:"
+    echo "    tailscale serve didn't succeed, so Kiln stays on plain HTTP for now:"
     echo "$out" | sed 's/^/      /' | head -8
     echo "    Enable HTTPS Certificates on the DNS page of the Tailscale admin console, then re-run this script."
   fi
@@ -133,7 +155,7 @@ fi
 chown "$SERVICE_USER:$SERVICE_USER" "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
-echo "==> Installing the agent-hub service"
+echo "==> Installing the Kiln service (agent-hub)"
 sed "s/AGENT_UID/$AGENT_UID/g" "$APP_DIR/deploy/agent-hub.service" > /etc/systemd/system/agent-hub.service
 systemctl daemon-reload
 systemctl enable -q agent-hub.service
@@ -141,7 +163,7 @@ systemctl restart agent-hub.service
 
 if ufw status 2>/dev/null | grep -q "Status: active"; then
   if [[ $HTTPS_OK -eq 1 ]]; then
-    # Agent Hub is only on localhost now; HTTPS arrives on 443 via Tailscale.
+    # Kiln is only on localhost now; HTTPS arrives on 443 via Tailscale.
     ufw delete allow in on tailscale0 to any port "$PORT" proto tcp >/dev/null 2>&1 || true
     echo "==> Allowing HTTPS (443) on tailscale0 (ufw)"
     ufw allow in on tailscale0 to any port 443 proto tcp comment 'agent-hub https' >/dev/null
@@ -159,7 +181,7 @@ systemctl is-active -q agent-hub.service || { journalctl -u agent-hub -n 30 --no
 
 cat <<EOF
 
-Agent Hub is installed and listening on $(env_get BIND_HOSTS) port $PORT.
+Kiln is installed and listening on $(env_get BIND_HOSTS) port $PORT.
 
 Open $( [[ -n $(env_get PUBLIC_URL) ]] && env_get PUBLIC_URL || echo "http://$(env_get BIND_HOSTS | tr ',' '\n' | grep -v '^127\.' | head -1):$PORT" ) in a browser on your tailnet.
 If you haven't yet:
@@ -168,7 +190,7 @@ If you haven't yet:
        sudo systemctl restart agent-hub
   - in the Tailscale admin console, allow this server's ports in the ACL grant:
     "tcp:443" (HTTPS) or "tcp:$PORT" (plain HTTP), plus "tcp:8200-8299" for previews.
-  - for agent runs, store the Claude token (from `claude setup-token`) and, to push
+  - for agent runs, store the Claude token (run: claude setup-token) and, to push
     branches, a fine-grained GitHub token:
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_secret claude
        cd $APP_DIR/backend && sudo -u $SERVICE_USER ../.venv/bin/python -m app.set_secret github

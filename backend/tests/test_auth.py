@@ -94,3 +94,26 @@ def test_websocket_origin_check(settings):
     assert not auth.ws_allowed(_WS("http://evil.example", "hub:8090", token))
     assert not auth.ws_allowed(_WS(None, "hub:8090", token))
     assert not auth.ws_allowed(_WS("http://hub:8090", "hub:8090", None))
+
+
+def test_logout_ends_the_session_even_for_a_copied_cookie(admin):
+    from tests.conftest import CSRF
+
+    stolen = admin.cookies.get("ah_session")
+    assert admin.get("/api/auth/me").status_code == 200
+    assert admin.post("/api/auth/logout", headers=CSRF).status_code == 200
+    admin.cookies.set("ah_session", stolen)
+    assert admin.get("/api/auth/me").status_code == 401
+    admin.cookies.clear()
+    r = admin.post("/api/auth/login", json={"password": "correct horse battery"}, headers=CSRF)
+    assert r.status_code == 200 and admin.get("/api/auth/me").status_code == 200  # a new login works
+
+
+def test_unknown_host_names_are_refused(client):
+    assert client.get("/api/health").status_code == 200
+    r = client.get("/api/health", headers={"host": "attacker.example"})
+    assert r.status_code == 403 and r.text == "Unknown host"
+    assert client.get("/api/health", headers={"host": "127.0.0.1:8090"}).status_code == 200
+    with pytest.raises(Exception):
+        with client.websocket_connect("/api/events", headers={"host": "attacker.example"}):
+            pass
