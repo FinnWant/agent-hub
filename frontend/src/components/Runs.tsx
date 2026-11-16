@@ -76,6 +76,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
               </span>
               <span className="run-item-meta">
                 {STATE_LABEL[r.state]} · {ago(r.created_at)}
+                {r.verify && ` · checks ${r.verify === "passed" ? "pass" : "fail"}`}
                 {r.cost_usd != null && ` · $${r.cost_usd.toFixed(2)}`}
               </span>
             </button>
@@ -317,6 +318,7 @@ function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => 
       <header className="run-head">
         <div className="run-head-top">
           <RunBadge state={run.state} />
+          {run.verify && <CheckBadge passed={run.verify === "passed"} rounds={run.verify_attempts} />}
           <span className="mono muted">{duration(run, now)}</span>
           {costUsd != null && <span className="mono muted" title="Estimated by Claude Code">${costUsd.toFixed(3)}</span>}
           {turnsUsed != null && <span className="mono muted">{turnsUsed}/{run.max_turns} turns</span>}
@@ -376,6 +378,34 @@ function RunView({ initial, onChange }: { initial: Run; onChange: (run: Run) => 
   );
 }
 
+function CheckBadge({ passed, rounds }: { passed: boolean; rounds: number }) {
+  const title = rounds ? `The agent was sent back ${rounds} time${rounds === 1 ? "" : "s"} by failing checks` : undefined;
+  return (
+    <span className={`badge ${passed ? "run-succeeded" : "run-failed"}`} title={title}>
+      <Icon name={passed ? "check" : "clear"} size={12} />
+      Checks {passed ? "pass" : "fail"}
+    </span>
+  );
+}
+
+type CheckEvent = Extract<RunEvent, { kind: "check" }>;
+
+function CheckLine({ e }: { e: CheckEvent }) {
+  const [open, setOpen] = useState(!e.passed);
+  const when = e.phase === "final" ? "after the run" : `before finishing, round ${e.attempt ?? 1}`;
+  const result = e.passed ? "Checks pass" : e.timed_out ? "Checks took too long" : `Checks fail (exit ${e.exit_code ?? "?"})`;
+  return (
+    <div className={`ev ev-check ${e.passed ? "ev-check-pass" : "ev-check-fail"}`}>
+      <button className="ev-check-head" onClick={() => setOpen((o) => !o)} aria-expanded={open} disabled={!e.text}>
+        <Icon name={e.passed ? "check" : "clear"} size={14} />
+        <strong>{result}</strong>
+        <span className="muted">{when} · {e.seconds.toFixed(1)} s</span>
+      </button>
+      {open && e.text && <pre>{e.text}</pre>}
+    </div>
+  );
+}
+
 function EventLine({ e }: { e: RunEvent }) {
   const [open, setOpen] = useState(false);
   if (e.type === "status") return null;
@@ -396,6 +426,8 @@ function EventLine({ e }: { e: RunEvent }) {
       return <div className="ev ev-text">{e.text}</div>;
     case "result":
       return <div className="ev ev-result">{e.text}</div>;
+    case "check":
+      return <CheckLine e={e} />;
     case "user":
       return (
         <div className="ev ev-user">

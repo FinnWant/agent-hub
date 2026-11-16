@@ -233,11 +233,15 @@ class SandboxService:
                       detail={"cmd": shown[:200], "exit_code": result.exit_code})
         return result
 
-    def update_settings(self, sandbox_id: str, ip: str, *, allow_push: bool | None = None) -> Sandbox:
+    def update_settings(self, sandbox_id: str, ip: str, *, allow_push: bool | None = None,
+                        verify_cmd: str | None = None) -> Sandbox:
+        """verify_cmd: None leaves it, "" removes the checks."""
         sb = self.get(sandbox_id)
-        changes = {}
+        changes: dict = {}
         if allow_push is not None and allow_push != sb.allow_push:
             changes["allow_push"] = allow_push
+        if verify_cmd is not None and (verify_cmd.strip() or None) != sb.verify_cmd:
+            changes["verify_cmd"] = verify_cmd.strip() or None
         if changes:
             self.db.update_sandbox(sb, **changes)
             self.db.audit(ip, "sandbox.settings", sb.id, detail=changes)

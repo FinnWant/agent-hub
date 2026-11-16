@@ -93,6 +93,10 @@ MIGRATIONS = [
     ("sandboxes", "workspace_bytes", "INTEGER"),
     ("runs", "session_id", "TEXT"),
     ("runs", "runner_state", "TEXT"),   # JSON: where to re-attach after a Kiln restart
+    ("sandboxes", "verify_cmd", "TEXT"),
+    ("runs", "verify_cmd", "TEXT"),     # the sandbox's checks when the run started
+    ("runs", "verify", "TEXT"),         # passed | failed | None (no checks, or not run)
+    ("runs", "verify_attempts", "INTEGER NOT NULL DEFAULT 0"),  # times the agent was sent back
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -117,6 +121,7 @@ class Sandbox:
     allow_push: bool = False
     preview_port: int | None = None      # host port (Tailscale IP) published for previews
     workspace_bytes: int | None = None   # last measured size of /workspace
+    verify_cmd: str | None = None        # the project's checks, e.g. "npm test" (see verify.py)
 
     def __post_init__(self) -> None:
         self.allow_push = bool(self.allow_push)
@@ -147,6 +152,9 @@ class Run:
     finished_at: float | None = None
     session_id: str | None = None        # the agent's own session (Claude Code), when it reports one
     runner_state: str | None = None      # internal; never sent to the browser
+    verify_cmd: str | None = None
+    verify: str | None = None
+    verify_attempts: int = 0
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)

@@ -239,13 +239,18 @@ queued → running → succeeded | failed | cancelled | timed_out
    `CLAUDE_TOKEN_MODE=direct` puts the token in the sandbox instead; only as a fallback.)
 4. **Limits:** one run per sandbox; wall-clock timeout (default 30 min) and cancel both kill the
    agent's whole process session; turn limit; the memory reserve is re-checked before a run.
-5. **Commit** everything the agent left on the branch (also after cancel or timeout, so the
+5. **Checks** (optional, per sandbox in Settings, e.g. `npm test && npm run lint`). When the
+   agent wants to finish, a Kiln Stop hook runs them in the sandbox; if they fail, the agent
+   gets the output and keeps working, up to `VERIFY_MAX_REPAIRS` (3) rounds. After the run Kiln
+   runs them once more and records *checks pass* or *checks fail* on the run. Checks prove
+   what the project's tests prove, no more: the agent can edit tests too, so review the diff.
+6. **Commit** everything the agent left on the branch (also after cancel or timeout, so the
    work can be reviewed).
-6. **Push** (only if enabled for the sandbox, the run succeeded, and the repository is on
+7. **Push** (only if enabled for the sandbox, the run succeeded, its checks didn't fail, and the repository is on
    github.com): the branch is bundled in the sandbox, streamed out to disk, fetched into a
    fresh repo on the host and pushed by URL, exactly `agent/<run-id>`, never forced. Nothing
    the agent wrote (hooks, `.git/config`, credential helpers) runs alongside the token.
-7. **Review.** The Changes tab's diff is computed *on the host* from the same kind of export,
+8. **Review.** The Changes tab's diff is computed *on the host* from the same kind of export,
    with the host's git in a fresh repository. A fake `git` in the sandbox, attributes that
    mark files as binary, textconv filters or replace refs can't change what you see.
 

@@ -141,6 +141,7 @@ const paths = {
   external: "M9.5 3H13v3.5M13 3L7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5",
   broom: "M10.5 2.5L7 8M4 8.5h6l1 5H3zM6 11v2.5M8 11v2.5",
   chevron: "M6 4l4 4-4 4",
+  check: "M3.5 8.5l3 3 6-7",
   arrowDown: "M8 3v10M4 9l4 4 4-4",
 };
 

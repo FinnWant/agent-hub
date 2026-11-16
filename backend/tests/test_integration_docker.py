@@ -375,6 +375,35 @@ def test_real_claude_code_obeys_kiln_hooks(real):
     assert r.output.split() == ["root", "644", "root", "755"], r.output  # and no WRITABLE
 
 
+def test_real_claude_code_is_sent_back_by_failing_checks(real):
+    """With your Claude token (skipped if none): the sandbox's checks need something the prompt
+    doesn't mention. The agent's first stop is blocked with the check output, it fixes the
+    problem, and the run ends with passing checks."""
+    import asyncio
+
+    from app import config
+
+    if not config.settings.claude_code_oauth_token:
+        pytest.skip("no CLAUDE_CODE_OAUTH_TOKEN configured")
+    svc, created = real
+    sb = _sandbox(svc, created, "run-checks")
+    svc.update_settings(sb.id, "t", verify_cmd='[ "$(cat VERSION 2>/dev/null)" = "1.0" ] '
+                        '|| { echo "check failed: a file named VERSION must contain exactly 1.0"; exit 1; }')
+    runs = _manager(svc)
+    run = runs.create(sandbox_id=sb.id, prompt="Create a file named hello.txt containing exactly the word hi, "
+                      "then finish.", runner="claude-code", timeout=300, max_turns=12, ip="t")
+    asyncio.run(runs._execute(run))
+    done = svc.db.get_run(run.id)
+    evs = svc.db.run_events(run.id)
+    assert done.state == "succeeded", (done.error, evs[-10:])
+    checks = [e for e in evs if e.get("kind") == "check"]
+    assert checks and not checks[0]["passed"] and checks[0]["phase"] == "stop", checks
+    assert done.verify == "passed" and done.verify_attempts >= 1, (done.verify, done.verify_attempts)
+    assert checks[-1]["phase"] == "final" and checks[-1]["passed"]
+    r = svc.exec(sb.id, f"git show {done.branch}:VERSION", 30, "t")
+    assert r.output.strip() == "1.0", r.output
+
+
 # ---------------------------------------------------------------------------
 # Files, diff, preview, stats, prune (phase 4)
 # ---------------------------------------------------------------------------

@@ -49,6 +49,10 @@ class HookHandler:
     fn: Callable[[RunManager, Run, HookCall], Awaitable[HookReply | None]]
     wait: int = 0
     matcher: str | None = None
+    applies: Callable[[Run], bool] | None = None  # None: every run; else installed only where True
+
+    def for_run(self, run: Run) -> bool:
+        return self.applies is None or bool(self.applies(run))
 
 
 async def mark_compaction(manager: RunManager, run: Run, call: HookCall) -> None:
@@ -57,7 +61,10 @@ async def mark_compaction(manager: RunManager, run: Run, call: HookCall) -> None
     manager._sys(run, f"The agent's context is being compacted ({how}); it continues from a summary")
 
 
-DEFAULT_HOOKS = [HookHandler("PreCompact", mark_compaction)]
+def default_hooks() -> list[HookHandler]:
+    from .verify import stop_handler
+
+    return [HookHandler("PreCompact", mark_compaction), stop_handler()]
 
 
 class RunManager:
@@ -75,7 +82,9 @@ class RunManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._dropped: set[str] = set()
         self._hook_tasks: set[asyncio.Task] = set()
-        self.hooks: list[HookHandler] = list(DEFAULT_HOOKS)
+        self.hooks: list[HookHandler] = default_hooks()
+        self.verify_attempts: dict[str, int] = {}  # run id -> times sent back by failing checks
+        self.verify_gave_up: set[str] = set()
         self.on_finished = None  # callable(run, sandbox_name), e.g. Notifier.run_finished
 
     # ---- queries -------------------------------------------------------------
@@ -161,7 +170,7 @@ class RunManager:
             run = Run(id=rid, sandbox_id=sandbox_id, runner=runner, prompt=prompt,
                       timeout=min(timeout or s.run_timeout_default, s.run_timeout_max),
                       max_turns=min(max_turns or s.run_max_turns_default, s.run_max_turns_max),
-                      branch=f"agent/{rid}")
+                      branch=f"agent/{rid}", verify_cmd=sb.verify_cmd or None)
             self.db.insert_run(run)
         self.db.audit(ip, "run.start", sandbox_id, detail={"run": rid, "runner": runner,
                                                            "prompt": prompt[:200]})
@@ -265,6 +274,8 @@ class RunManager:
         hooks: dict[str, int] = {}
         matchers: dict[str, set[str | None]] = {}
         for h in self.hooks:
+            if not h.for_run(run):
+                continue
             hooks[h.event] = max(hooks.get(h.event, 0), h.wait)
             matchers.setdefault(h.event, set()).add(h.matcher)
         return RunSpec(run_id=run.id, container_id=sb.container_id or "", prompt=run.prompt,
@@ -282,7 +293,7 @@ class RunManager:
         task.add_done_callback(self._hook_tasks.discard)
 
     async def _handle_hook(self, run: Run, proc: RunProcess, call: HookCall) -> None:
-        handlers = [h for h in self.hooks if h.event == call.event]
+        handlers = [h for h in self.hooks if h.event == call.event and h.for_run(run)]
         waits = any(h.wait > 0 for h in handlers)
         replies: list[HookReply] = []
         try:
@@ -385,6 +396,14 @@ class RunManager:
                 except Exception:  # noqa: BLE001
                     log.exception("releasing run %s failed", run.id)
 
+        if state == "succeeded" and run.verify_cmd and run.base_branch:
+            from .verify import run_check
+
+            self._sys(run, f"Running the checks: {run.verify_cmd}")
+            check = await run_check(self, run)
+            self.emit(run, check.event("final"))
+            self.db.update_run(run, verify="passed" if check.passed else "failed")
+
         commit = None
         pushed = False
         if run.base_branch:  # the branch exists: keep whatever the agent produced
@@ -393,6 +412,9 @@ class RunManager:
                 commit = fin.commit_sha if fin.commits else None
                 if not fin.commits:
                     self._sys(run, "No changes were made")
+                elif state == "succeeded" and run.verify == "failed":
+                    if sb.allow_push:
+                        self._sys(run, "Not pushed: the checks fail")
                 elif state == "succeeded":
                     pushed = await asyncio.to_thread(self.workspace.push, sb, run, lambda t: self._sys(run, t))
             except (WorkspaceError, SandboxError) as e:
@@ -422,3 +444,5 @@ class RunManager:
         self._cancel_reason.pop(run.id, None)
         self._seq.pop(run.id, None)
         self._dropped.discard(run.id)
+        self.verify_attempts.pop(run.id, None)
+        self.verify_gave_up.discard(run.id)

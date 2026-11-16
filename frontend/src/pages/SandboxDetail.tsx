@@ -170,6 +170,7 @@ function Settings({ sb, system, onChanged, onDestroy }: {
         <button className="toggle" role="switch" aria-checked={sb.allow_push} aria-labelledby="push-label"
           disabled={saving || (!canPush && !sb.allow_push)} onClick={togglePush} />
       </div>
+      <ChecksSetting sb={sb} onChanged={onChanged} />
       <dl className="card kv">
         <dt>Template</dt><dd>{sb.template}</dd>
         <dt>Memory</dt><dd>{bytes(sb.memory)} (no swap)</dd>
@@ -190,6 +191,50 @@ function Settings({ sb, system, onChanged, onDestroy }: {
         </button>
       </div>
     </div>
+  );
+}
+
+function ChecksSetting({ sb, onChanged }: { sb: Sandbox; onChanged: () => void }) {
+  const toast = useToast();
+  const [value, setValue] = useState(sb.verify_cmd ?? "");
+  const [hint, setHint] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setValue(sb.verify_cmd ?? ""), [sb.verify_cmd]);
+  useEffect(() => {
+    api.templates().then((ts) => setHint(ts.find((t) => t.name === sb.template)?.check_hint ?? "")).catch(() => {});
+  }, [sb.template]);
+  const changed = value.trim() !== (sb.verify_cmd ?? "");
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.updateSandbox(sb.id, { verify_cmd: value.trim() });
+      toast("success", value.trim() ? "Checks saved; they apply from the next run" : "Checks removed");
+      onChanged();
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form className="card checks-setting" onSubmit={(e) => { e.preventDefault(); save(); }}>
+      <div>
+        <label htmlFor="verify-cmd"><strong>Checks</strong></label>
+        <p>
+          A command that passes when the work is done, such as your tests and linter. When the agent wants to
+          finish, Kiln runs it; if it fails, the agent gets the output and keeps working (a few rounds at most).
+          Kiln runs it again after the run, and never pushes a branch whose checks fail.
+        </p>
+      </div>
+      <div className="checks-row">
+        <input id="verify-cmd" className="input mono" maxLength={1000} spellCheck={false} autoComplete="off"
+          placeholder={hint ? `e.g. ${hint}` : "e.g. make test"} value={value}
+          onChange={(e) => setValue(e.target.value)} />
+        <button className="btn" type="submit" disabled={saving || !changed}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </form>
   );
 }
 

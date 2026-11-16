@@ -264,7 +264,8 @@ def system(_: Admin, svc: Svc) -> dict:
 @app.get("/api/templates")
 def templates(_: Admin, svc: Svc) -> list[dict]:
     return [{"name": t.name, "description": t.description, "image": t.image,
-             "preview_port": t.preview_port, "built": svc.backend.image_exists(t.image)}
+             "preview_port": t.preview_port, "built": svc.backend.image_exists(t.image),
+             "check_hint": t.check_hint}
             for t in TEMPLATES.values()]
 
 
@@ -334,12 +335,14 @@ def get_sandbox(sandbox_id: str, _: Admin, svc: Svc, runs: Runs, mon: Mon) -> di
 
 class SandboxSettings(BaseModel):
     allow_push: bool | None = None
+    verify_cmd: str | None = Field(default=None, max_length=1000)  # "" removes the checks
 
 
 @app.patch("/api/sandboxes/{sandbox_id}")
 def update_sandbox(sandbox_id: str, body: SandboxSettings, _: Admin, request: Request, svc: Svc,
                    runs: Runs) -> dict:
-    sb = svc.update_settings(sandbox_id, auth.client_ip(request), allow_push=body.allow_push)
+    sb = svc.update_settings(sandbox_id, auth.client_ip(request), allow_push=body.allow_push,
+                             verify_cmd=body.verify_cmd)
     return sandbox_out(sb, runs)
 
 

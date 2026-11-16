@@ -126,6 +126,10 @@ class Settings:
 
     # Agent runs
     run_timeout_default: int = _int("RUN_TIMEOUT_DEFAULT", 30 * 60)
+    # Checks (a sandbox's verify command): how long one may take, and how many times a run's
+    # agent is sent back to fix failing checks before it may stop anyway.
+    verify_timeout: int = _int("VERIFY_TIMEOUT", 10 * 60)
+    verify_max_repairs: int = _int("VERIFY_MAX_REPAIRS", 3)
     run_timeout_max: int = _int("RUN_TIMEOUT_MAX", 4 * 60 * 60)
     run_max_turns_default: int = _int("RUN_MAX_TURNS_DEFAULT", 50)
     run_max_turns_max: int = _int("RUN_MAX_TURNS_MAX", 500)

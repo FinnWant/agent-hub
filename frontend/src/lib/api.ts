@@ -20,6 +20,8 @@ export interface Sandbox {
   preview_port: number | null;
   preview_url: string | null;
   workspace_bytes: number | null;
+  /** The project's checks, run by Kiln when the agent wants to stop and after each run. */
+  verify_cmd: string | null;
   memory_usage: number | null;
   last_run?: { id: string; state: RunState; created_at: number; finished_at: number | null } | null;
 }
@@ -46,6 +48,10 @@ export interface Run {
   started_at: number | null;
   finished_at: number | null;
   session_id: string | null;
+  verify_cmd: string | null;
+  verify: "passed" | "failed" | null;
+  /** Times failing checks sent the agent back to work. */
+  verify_attempts: number;
   /** The agent is running and reads messages (see `api.sendRunMessage`). */
   can_message: boolean;
 }
@@ -53,6 +59,8 @@ export interface Run {
 export type RunEvent = { seq: number; ts: number } & (
   | { type: "log"; kind: "text" | "tool" | "tool_result" | "system" | "stderr" | "stdout" | "result" | "error" | "user";
       text: string; name?: string; is_error?: boolean }
+  | { type: "log"; kind: "check"; text: string; phase: "stop" | "final"; passed: boolean;
+      exit_code: number | null; timed_out: boolean; seconds: number; attempt?: number }
   | { type: "status"; state: RunState }
   | { type: "cost"; cost_usd: number | null; turns: number | null; duration_ms: number | null }
   | { type: "done"; state: RunState; error: string | null; commit: string | null; branch: string; pushed: boolean }
@@ -128,6 +136,7 @@ export interface Template {
   image: string;
   preview_port: number;
   built: boolean;
+  check_hint: string;
 }
 
 export interface SystemInfo {
@@ -251,7 +260,7 @@ export const api = {
   start: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/start`),
   stop: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/stop`),
   destroy: (id: string) => request<void>("DELETE", `/sandboxes/${encodeURIComponent(id)}`),
-  updateSandbox: (id: string, body: { allow_push?: boolean }) =>
+  updateSandbox: (id: string, body: { allow_push?: boolean; verify_cmd?: string }) =>
     request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
   runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),
   startRun: (sandboxId: string, body: { prompt: string; timeout_minutes?: number; max_turns?: number }) =>

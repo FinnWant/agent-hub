@@ -70,7 +70,11 @@ def run_message(run: Run, sb_name: str) -> dict[str, Any] | None:
         extra = f"committed {run.commit_sha[:7]}" if run.commit_sha else "no changes"
         if run.pushed:
             extra += ", pushed"
-        return {"kind": "run.finished", "title": f"{sb_name}: run finished", "body": f"{prompt} · {extra}"}
+        if run.verify == "failed":
+            return {"kind": "run.failed", "title": f"{sb_name}: run finished, checks fail",
+                    "body": f"{prompt} · {extra}, not pushed"}
+        title = f"{sb_name}: run finished" + (", checks pass" if run.verify == "passed" else "")
+        return {"kind": "run.finished", "title": title, "body": f"{prompt} · {extra}"}
     if run.state in ("failed", "timed_out"):
         what = "timed out" if run.state == "timed_out" else "failed"
         return {"kind": "run.failed", "title": f"{sb_name}: run {what}",
