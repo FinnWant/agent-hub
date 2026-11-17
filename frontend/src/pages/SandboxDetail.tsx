@@ -3,6 +3,7 @@ import { api, ApiError, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago, bytes, repoLabel } from "../lib/format";
 import { navigate, previousPath, useQuery, useTitle } from "../lib/router";
 import { BackLink } from "../components/BackLink";
+import { noteSandboxOpened } from "../components/SidebarActivity";
 import { usePoll } from "../lib/usePoll";
 import { Dialog, Icon, StatusBadge, useToast } from "../components/ui";
 import Terminal from "../components/Terminal";
@@ -38,6 +39,10 @@ export default function SandboxDetail({ id, tab: tabParam }: { id: string; tab: 
   const [destroying, setDestroying] = useState(false);
   const toast = useToast();
   useTitle(sb?.name ?? "Sandbox");
+  const found = !!sb;
+  useEffect(() => {
+    if (found) noteSandboxOpened(id);
+  }, [id, found]);
 
   if (!sb) {
     return (

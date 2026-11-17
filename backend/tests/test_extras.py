@@ -230,3 +230,17 @@ def test_full_log_keeps_what_the_stored_log_drops(admin, settings, monkeypatch, 
     assert r.headers["content-disposition"].startswith("attachment")
     assert len(full) > len(stored) and any("Log limit reached" in (e.get("text") or "") for e in stored)
     assert any(e.get("kind") == "result" for e in full)
+
+
+# ---------------------------------------------------------------------------
+# Live runs (sidebar)
+# ---------------------------------------------------------------------------
+
+def test_live_runs_across_sandboxes(admin, runs):
+    sb = make_sandbox(admin)
+    runs.runners["claude-code"].scale = 0.5
+    live = start(admin, sb["id"]).json()
+    got = admin.get("/api/runs").json()
+    assert [r["id"] for r in got] == [live["id"]] and got[0]["sandbox_name"] == sb["name"]
+    wait_final(admin, live["id"])
+    assert admin.get("/api/runs").json() == []

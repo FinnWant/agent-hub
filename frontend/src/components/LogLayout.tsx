@@ -92,15 +92,14 @@ export function LogBar({ prefs, update, viewRef, headRef }: {
   const z = ZOOMS.indexOf(prefs.zoom);
   return (
     <div className="log-bar">
-      {!prefs.max && (
+      <span className="log-bar-label">Log</span>
+      {prefs.max ? <span className="spacer" /> : (
         <div className="log-grip" role="separator" aria-orientation="horizontal" tabIndex={0}
           aria-label="Resize the log (arrow keys; double-click to reset)" title="Drag to resize · double-click to reset"
           onPointerDown={onPointerDown} onKeyDown={onKey} onDoubleClick={() => update({ head: null })}>
           <span aria-hidden />
         </div>
       )}
-      <span className="log-bar-label">Log</span>
-      <span className="spacer" />
       <div className="log-bar-tools">
         <button type="button" className="btn btn-ghost btn-xs" disabled={z <= 0} aria-label="Smaller text"
           title="Smaller text" onClick={() => update({ zoom: ZOOMS[z - 1] })}>A−</button>

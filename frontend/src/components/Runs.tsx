@@ -6,6 +6,7 @@ import { Icon, Kbd, useToast } from "./ui";
 import { RequestCard, usePendingRequests } from "./Requests";
 import { LedgerButton, ReportCard, Timeline } from "./RunExtras";
 import { LogBar, useLogPrefs } from "./LogLayout";
+import { RUNS_CHANGED_EVENT } from "./SidebarActivity";
 
 const MAX_EVENTS = 5000; // cap the in-browser buffer
 const ACTIVE: RunState[] = ["queued", "running"];
@@ -291,6 +292,10 @@ function RunView({ initial, onChange, onContinue }: {
   }, [initial.id, onChange]);
 
   const { events, conn } = useRunEvents(initial.id, refresh);
+  // The sidebar's Live list follows runs starting and ending.
+  useEffect(() => {
+    window.dispatchEvent(new Event(RUNS_CHANGED_EVENT));
+  }, [run.state]);
   const { items: openRequests, reload: reloadRequests } = usePendingRequests(initial.id, active);
 
   // Usage, budget and paused time change without log events: re-read the run while it's live.

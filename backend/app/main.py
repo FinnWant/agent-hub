@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, field_validator
 from . import __version__, auth, config
 from .capacity import disk_usage, mem_available, mem_total
 from .config import format_size, parse_size
-from .db import Database, Sandbox
+from .db import ACTIVE_RUN_STATES, Database, Sandbox
 from . import demo, files as files_mod, preview as preview_mod
 from .db import Run
 from .monitor import Monitor
@@ -580,6 +580,14 @@ async def start_run(sandbox_id: str, body: StartRun, _: Admin, request: Request,
         ip=auth.client_ip(request), continue_from=body.continue_from)
     runs.launch(run)
     return run_out(run)
+
+
+@app.get("/api/runs")
+def live_runs(_: Admin, svc: Svc, runs: Runs) -> list[dict]:
+    """Runs in progress across all sandboxes (the sidebar's Live list), newest first."""
+    names = {sb.id: sb.name for sb in svc.list()}
+    return [{**run_out(r), "sandbox_name": names.get(r.sandbox_id)}
+            for r in runs.db.list_runs(states=ACTIVE_RUN_STATES, limit=50)]
 
 
 @app.get("/api/runs/{run_id}")

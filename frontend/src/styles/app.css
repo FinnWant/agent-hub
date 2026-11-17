@@ -2844,10 +2844,10 @@ a.row:hover {
   min-width: 44px;
 }
 
-/* The whole bar is the drag target; the grip in the middle shows it */
+/* The space between the label and the buttons is the drag target; the grip in its middle shows it */
 .log-grip {
-  position: absolute;
-  inset: 0 160px 0 72px;
+  flex: 1;
+  align-self: stretch;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2915,7 +2915,8 @@ body.is-resizing {
   }
 
   .log-grip {
-    display: none;
+    visibility: hidden; /* keeps the buttons on the right */
+    pointer-events: none;
   }
 
   /* Expanded on a phone: the run fills the screen, log first */
@@ -2934,5 +2935,124 @@ body.is-resizing {
     flex: 1;
     height: auto;
     min-height: 0;
+  }
+}
+
+/* ---------------------------------------------------------------- Sidebar: Live and Recent */
+.side-activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-top: var(--space-6);
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.side-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-1-5);
+  padding: 0 var(--space-2);
+  font: 500 var(--text-xs) var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+
+.side-count {
+  color: var(--text-secondary);
+  letter-spacing: 0;
+}
+
+.side-empty {
+  margin: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-disabled);
+}
+
+.side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.side-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.side-item:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.side-item[aria-current="page"] {
+  color: var(--text-primary);
+  background: var(--bg-active);
+}
+
+.side-item .dot {
+  flex: none;
+}
+
+.side-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.side-item-name,
+.side-item-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-item-compact .side-item-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.side-item-name {
+  font-weight: 500;
+}
+
+.side-item-sub {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.side-item-meta {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.dot-waiting {
+  background: var(--status-warning);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@media (max-width: 760px) {
+  .side-activity {
+    display: none;
   }
 }

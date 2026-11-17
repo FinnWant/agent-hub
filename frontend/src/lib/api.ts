@@ -321,6 +321,7 @@ export const api = {
   system: () => request<SystemInfo>("GET", "/system"),
   templates: () => request<Template[]>("GET", "/templates"),
   sandboxes: () => request<Sandbox[]>("GET", "/sandboxes"),
+  liveRuns: () => request<(Run & { sandbox_name: string | null })[]>("GET", "/runs"),
   sandbox: (id: string) => request<Sandbox>("GET", `/sandboxes/${encodeURIComponent(id)}`),
   createSandbox: (body: {
     name: string;

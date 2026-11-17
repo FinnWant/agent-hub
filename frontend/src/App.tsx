@@ -7,6 +7,7 @@ import Home from "./pages/Home";
 import SandboxDetail from "./pages/SandboxDetail";
 import Audit from "./pages/Audit";
 import { NeedsYou, usePendingRequests } from "./components/Requests";
+import SidebarActivity from "./components/SidebarActivity";
 import NotificationsDialog, { useHubEvents } from "./components/Notifications";
 import { installExternalLinkHandler, registerServiceWorker } from "./lib/notifications";
 
@@ -77,6 +78,7 @@ export default function App() {
           <a href="/audit" className="nav-item" aria-current={route.name === "audit" ? "page" : undefined}>
             <Icon name="list" /> <span className="nav-label">Audit log</span>
           </a>
+          <SidebarActivity currentSandbox={route.name === "sandbox" ? route.id : null} />
           <div className="sidebar-foot">
             {health && (
               <div className="host-mini muted" style={{ fontSize: 11 }}>
