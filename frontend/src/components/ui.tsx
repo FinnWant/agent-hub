@@ -144,6 +144,8 @@ const paths = {
   check: "M3.5 8.5l3 3 6-7",
   inbox: "M2.5 9.5h3l1 2h3l1-2h3M2.5 9.5L4 3.5h8l1.5 6v3.5h-11z",
   arrowDown: "M8 3v10M4 9l4 4 4-4",
+  expand: "M3 6.5V3h3.5M13 6.5V3H9.5M3 9.5V13h3.5M13 9.5V13H9.5",
+  collapse: "M6.5 3v3.5H3M9.5 3v3.5H13M6.5 13V9.5H3M9.5 13V9.5H13",
 };
 
 export function Icon({ name, size = 16 }: { name: keyof typeof paths; size?: number }) {

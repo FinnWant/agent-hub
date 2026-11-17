@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { api, ApiError, runEventsUrl, type Run, type RunEvent, type RunState, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago } from "../lib/format";
 import { navigate, useQuery, withQuery } from "../lib/router";
 import { Icon, Kbd, useToast } from "./ui";
 import { RequestCard, usePendingRequests } from "./Requests";
 import { LedgerButton, ReportCard, Timeline } from "./RunExtras";
+import { LogBar, useLogPrefs } from "./LogLayout";
 
 const MAX_EVENTS = 5000; // cap the in-browser buffer
 const ACTIVE: RunState[] = ["queued", "running"];
@@ -357,9 +358,25 @@ function RunView({ initial, onChange, onContinue }: {
   const costUsd = run.cost_usd ?? cost?.cost_usd ?? null;
   const turnsUsed = run.num_turns ?? cost?.turns ?? null;
 
+  const [prefs, updatePrefs] = useLogPrefs();
+  const viewRef = useRef<HTMLDivElement>(null);
+  const headRef = useRef<HTMLElement>(null);
+  // Keep following the bottom when the log's size or text size changes.
+  useLayoutEffect(() => {
+    const el = logRef.current;
+    if (el && follow) el.scrollTop = el.scrollHeight;
+  }, [prefs, follow]);
+  useEffect(() => {
+    if (!prefs.max) return;
+    const onKey = (e: globalThis.KeyboardEvent) => e.key === "Escape" && updatePrefs({ max: false });
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [prefs.max, updatePrefs]);
+
   return (
-    <div className="card run-view">
-      <header className="run-head">
+    <div ref={viewRef} className={`card run-view ${prefs.max ? "is-log-max" : ""}`}
+      style={prefs.head != null ? ({ "--head-max": `${prefs.head}px` } as CSSProperties) : undefined}>
+      <header className="run-head" ref={headRef}>
         <div className="run-head-top">
           <RunBadge state={run.state} />
           {run.verify && <CheckBadge passed={run.verify === "passed"} rounds={run.verify_attempts} />}
@@ -402,7 +419,9 @@ function RunView({ initial, onChange, onContinue }: {
         )}
         <Timeline events={events} run={run} />
       </header>
-      <div className="run-log" ref={logRef} onScroll={onScroll} aria-live="polite">
+      <LogBar prefs={prefs} update={updatePrefs} viewRef={viewRef} headRef={headRef} />
+      <div className="run-log" ref={logRef} onScroll={onScroll} aria-live="polite"
+        style={prefs.zoom !== 1 ? { zoom: prefs.zoom } : undefined}>
         {events.map((e) => <EventLine key={e.seq} e={e} />)}
         {active && openRequests.map((r) => (
           <div key={r.id} className="ev"><RequestCard req={r} onDone={() => { reloadRequests(); refresh(); }} /></div>

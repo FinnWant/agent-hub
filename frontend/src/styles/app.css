@@ -1540,12 +1540,22 @@ a.row:hover {
   overflow: hidden;
 }
 
+/* The header (prompt, report, timeline) gets at most --head-max; the log below gets the rest.
+   The bar between them resizes the split (LogLayout.tsx). The header scrolls when it's taller. */
 .run-head {
-  padding: var(--space-4) var(--space-5) var(--space-3);
-  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: var(--head-max, 38cqh); /* 38% of the run view (a size container, below) */
+  overflow-y: auto;
+  padding: 0 var(--space-5) var(--space-3);
 }
 
 .run-head-top {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-top: var(--space-4);
+  background: var(--bg-surface);
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -2789,5 +2799,140 @@ a.row:hover {
   .detail-head h1,
   .page-head h1 {
     overflow-wrap: anywhere;
+  }
+}
+
+/* ---------------------------------------------------------------- Run log: bar, resize, expand */
+.btn-xs {
+  height: 24px;
+  padding: 0 var(--space-1-5);
+  font-size: var(--text-xs);
+  gap: var(--space-1);
+}
+
+.log-bar {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-2) 0 var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.log-bar .spacer {
+  flex: 1;
+}
+
+.log-bar-label {
+  font: 500 var(--text-xs) var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+
+.log-bar-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.log-zoom {
+  min-width: 44px;
+}
+
+/* The whole bar is the drag target; the grip in the middle shows it */
+.log-grip {
+  position: absolute;
+  inset: 0 160px 0 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+  border-radius: var(--radius-sm);
+}
+
+.log-grip span {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong, var(--border-default));
+  transition: background-color var(--dur-fast) var(--ease-out), width var(--dur-fast) var(--ease-out);
+}
+
+.log-grip:hover span,
+.log-grip:focus-visible span,
+body.is-resizing .log-grip span {
+  width: 56px;
+  background: var(--accent);
+}
+
+.log-grip:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--border-accent);
+}
+
+body.is-resizing {
+  cursor: row-resize;
+  user-select: none;
+}
+
+@media (min-width: 901px) {
+  .run-view {
+    container-type: size; /* its height comes from the page, not its content: lets the header use cqh */
+  }
+}
+
+/* Expanded: the header folds to its top row and the log takes the rest */
+.run-view.is-log-max .run-head {
+  max-height: none;
+  flex: none;
+  padding-bottom: var(--space-3);
+}
+
+.run-view.is-log-max .run-head > :not(.run-head-top) {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  /* Phones and narrow windows: the page scrolls, so the log gets a fixed, generous height */
+  .run-head {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .run-head-top {
+    position: static;
+  }
+
+  .run-log {
+    flex: none;
+    height: max(320px, 70vh);
+    height: max(320px, 70dvh);
+  }
+
+  .log-grip {
+    display: none;
+  }
+
+  /* Expanded on a phone: the run fills the screen, log first */
+  .run-view.is-log-max {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    min-height: 0;
+    border-radius: 0;
+    border: 0;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .run-view.is-log-max .run-log {
+    flex: 1;
+    height: auto;
+    min-height: 0;
   }
 }
