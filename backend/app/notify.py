@@ -100,7 +100,7 @@ class Notifier:
         msg = run_message(run, sb_name)
         if msg:
             self.publish({**msg, "sandbox": run.sandbox_id, "run": run.id, "state": run.state,
-                          "url": f"/sandboxes/{run.sandbox_id}"})
+                          "url": f"/sandboxes/{run.sandbox_id}/runs?run={run.id}"})
 
     def sandbox_problem(self, sb: Sandbox, error: str) -> None:
         self.publish({"kind": "sandbox.problem", "title": f"{sb.name}: {error.splitlines()[0][:80]}",

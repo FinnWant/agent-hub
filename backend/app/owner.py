@@ -130,7 +130,7 @@ class Owner:
             try:
                 self.notify({"kind": "run.needs_you", "title": f"{sb.name}: the agent {what}",
                              "body": row["title"][:160], "sandbox": run.sandbox_id, "run": run.id,
-                             "request": rid, "url": f"/sandboxes/{run.sandbox_id}"})
+                             "request": rid, "url": f"/sandboxes/{run.sandbox_id}/runs?run={run.id}"})
             except Exception:  # noqa: BLE001
                 log.exception("needs-you notification failed")
         return row

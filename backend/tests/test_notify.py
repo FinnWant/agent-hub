@@ -109,7 +109,7 @@ def test_run_finish_reaches_open_windows(admin):
         while not got and time.monotonic() < deadline:
             got = ws.receive_json()["events"]
     assert got[0]["kind"] == "run.finished" and got[0]["title"] == "api: run finished"
-    assert got[0]["url"] == f"/sandboxes/{sb['id']}"
+    assert got[0]["url"] == f"/sandboxes/{sb['id']}/runs?run={got[0]['run']}"  # opens the run itself
 
 
 def test_sandbox_dying_on_its_own_is_reported_but_your_stop_is_not(admin, svc, backend):

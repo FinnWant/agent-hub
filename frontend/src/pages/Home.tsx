@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageBack } from "../components/BackLink";
 import { api, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago, bytes, gib, repoLabel } from "../lib/format";
 import { navigate, useTitle } from "../lib/router";
@@ -29,6 +30,7 @@ export default function Home() {
 
   return (
     <div className="page">
+      <PageBack />
       <header className="page-head">
         <div>
           <h1>Sandboxes</h1>

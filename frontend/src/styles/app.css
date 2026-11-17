@@ -10,6 +10,10 @@ body,
   height: 100%;
 }
 
+html {
+  -webkit-text-size-adjust: 100%; /* no text inflation when an iPhone rotates */
+}
+
 body {
   margin: 0;
   background: var(--bg-app);
@@ -17,6 +21,7 @@ body {
   font: 400 var(--text-base) / 1.5 var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-wrap: break-word; /* long URLs, paths and branch names wrap instead of widening the page */
 }
 
 /* Matte grain over the whole app, very faint */
@@ -819,6 +824,7 @@ a.row:hover {
 .dialog {
   width: min(520px, 100%);
   max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
   overflow: auto;
   background: var(--sheen), var(--bg-overlay);
   border: 1px solid var(--border-default);
@@ -1252,7 +1258,7 @@ a.row:hover {
 
 @media (max-width: 1080px) {
   .meters {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .meter:nth-child(3) {
@@ -1266,7 +1272,7 @@ a.row:hover {
 
 @media (max-width: 760px) {
   .shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr;
   }
 
@@ -1322,11 +1328,11 @@ a.row:hover {
   }
 
   .form-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .kv {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
   }
 
@@ -2236,7 +2242,7 @@ a.row:hover {
   }
 
   .runs {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     flex: none;
   }
 
@@ -2603,7 +2609,7 @@ a.row:hover {
 
 @media (max-width: 900px) {
   .files {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     flex: none;
   }
 
@@ -2617,7 +2623,7 @@ a.row:hover {
   }
 
   .hints {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px;
   }
 
@@ -2679,5 +2685,109 @@ a.row:hover {
   .sidebar-foot {
     flex-direction: row;
     gap: var(--space-1);
+  }
+}
+
+/* ---------------------------------------------------------------- Back link */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px; /* a comfortable tap target on a phone */
+}
+
+.crumbs-sep {
+  color: var(--text-tertiary);
+}
+
+/* ---------------------------------------------------------------- Phone: vertical scrolling only
+   The page always fits the screen's width. Wide things (code, diffs, the audit table, the terminal)
+   scroll sideways inside their own box; the page itself never does. */
+@media (max-width: 760px) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  .main {
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+  }
+
+  .hide-sm {
+    display: none;
+  }
+
+  /* The top bar fits without scrolling: icons over short labels, sharing the width */
+  .sidebar {
+    overflow-x: visible;
+    gap: var(--space-1);
+  }
+
+  .sidebar .nav-item {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    height: 44px;
+    padding: 0 var(--space-1);
+  }
+
+  .nav-label {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  /* Waiting requests stay visible on a phone: a small count on the icon */
+  .sidebar .nav-item .count {
+    display: inline-block;
+    position: absolute;
+    top: 3px;
+    left: calc(50% + 6px);
+    min-width: 16px;
+    padding: 0 4px;
+    margin: 0;
+    border-radius: var(--radius-full);
+    background: var(--accent);
+    color: var(--text-on-accent);
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+  }
+
+  .sidebar-foot {
+    flex: none;
+    gap: 0;
+  }
+
+  .sidebar-foot .btn {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    justify-content: center !important;
+  }
+
+  /* 16px fields: iPhone zooms the page in when a smaller one is focused, and stays zoomed */
+  input,
+  select,
+  textarea,
+  .input {
+    font-size: 16px;
+  }
+
+  .request-actions .input {
+    min-width: 0;
+    flex-basis: 100%;
+  }
+
+  .detail-head h1,
+  .page-head h1 {
+    overflow-wrap: anywhere;
   }
 }

@@ -527,7 +527,7 @@ class RunManager:
             self._sys(run, f"The run has used about ${cost:.2f} of its ${budget:.2f} budget")
             self.owner.notify({"kind": "run.budget", "title": f"{sb.name}: run at 80% of its budget",
                                "body": f"About ${cost:.2f} of ${budget:.2f}", "sandbox": run.sandbox_id,
-                               "run": run.id, "url": f"/sandboxes/{run.sandbox_id}"})
+                               "run": run.id, "url": f"/sandboxes/{run.sandbox_id}/runs?run={run.id}"})
         open_budget = [r for r in self.db.list_requests(state="pending", run_id=run.id) if r["kind"] == "budget"]
         if cost >= budget and not open_budget:
             await asyncio.to_thread(gw.hold, digest, True)

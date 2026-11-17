@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago, bytes, repoLabel } from "../lib/format";
-import { navigate, useTitle } from "../lib/router";
+import { navigate, previousPath, useQuery, useTitle } from "../lib/router";
+import { BackLink } from "../components/BackLink";
 import { usePoll } from "../lib/usePoll";
 import { Dialog, Icon, StatusBadge, useToast } from "../components/ui";
 import Terminal from "../components/Terminal";
@@ -20,10 +21,15 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "settings", label: "Settings" },
 ];
 
-export default function SandboxDetail({ id }: { id: string }) {
+const isTab = (t: string | null): t is Tab => TABS.some((x) => x.id === t);
+
+export default function SandboxDetail({ id, tab: tabParam }: { id: string; tab: string | null }) {
   const { data: sb, error, reload } = usePoll(() => api.sandbox(id), 5000, [id]);
   const { data: system } = usePoll(api.system, 15000);
-  const [tab, setTab] = useState<Tab>("runs");
+  useQuery(); // re-render on ?run= / ?file= changes (the back link reads them)
+  const tab: Tab = isTab(tabParam) ? tabParam : "runs";
+  // Each tab is its own URL, so Back returns to the previous tab instead of leaving the sandbox.
+  const setTab = (t: Tab) => navigate(`/sandboxes/${id}/${t}`);
   const [termOpened, setTermOpened] = useState(false); // connect only once the tab is used
   useEffect(() => {
     if (tab === "terminal") setTermOpened(true);
@@ -43,7 +49,10 @@ export default function SandboxDetail({ id }: { id: string }) {
             <a className="btn" href="/">Back to sandboxes</a>
           </div>
         ) : error ? (
-          <div className="banner banner-danger"><strong>Couldn't load it.</strong> {error.message}</div>
+          <>
+            <nav className="crumbs" aria-label="Breadcrumb"><BackLink /></nav>
+            <div className="banner banner-danger"><strong>Couldn't load it.</strong> {error.message}</div>
+          </>
         ) : null}
       </div>
     );
@@ -68,7 +77,13 @@ export default function SandboxDetail({ id }: { id: string }) {
   return (
     <div className="page page-wide">
       <nav className="crumbs" aria-label="Breadcrumb">
-        <a href="/"><Icon name="back" size={14} /> Sandboxes</a>
+        <BackLink />
+        {previousPath() && previousPath() !== "/" && (
+          <>
+            <span className="crumbs-sep" aria-hidden>·</span>
+            <a href="/">Sandboxes</a>
+          </>
+        )}
       </nav>
       <div className="detail-head">
         <h1>{sb.name}</h1>
@@ -103,7 +118,7 @@ export default function SandboxDetail({ id }: { id: string }) {
 
       <div className="tabs" role="tablist">
         {TABS.map((t) => (
-          <button key={t.id} className="tab" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}>
+          <button key={t.id} className="tab" role="tab" aria-selected={tab === t.id} onClick={() => t.id !== tab && setTab(t.id)}>
             {t.id === "terminal" && <Icon name="terminal" size={14} />} {t.label}
           </button>
         ))}

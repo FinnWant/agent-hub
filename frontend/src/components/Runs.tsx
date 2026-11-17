@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api, ApiError, runEventsUrl, type Run, type RunEvent, type RunState, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago } from "../lib/format";
+import { navigate, useQuery, withQuery } from "../lib/router";
 import { Icon, Kbd, useToast } from "./ui";
 import { RequestCard, usePendingRequests } from "./Requests";
 import { LedgerButton, ReportCard, Timeline } from "./RunExtras";
@@ -37,7 +38,9 @@ function duration(run: Run, now: number): string {
 
 export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo | null }) {
   const [runs, setRuns] = useState<Run[] | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  // The open run is in the URL (?run=), so Back returns to the run you were reading before.
+  const picked = useQuery().get("run");
+  const setSelected = (rid: string) => rid !== picked && navigate(withQuery({ run: rid }));
   const [continuing, setContinuing] = useState<Run | null>(null);
   const toast = useToast();
 
@@ -45,7 +48,6 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
     try {
       const list = await api.runs(sb.id);
       setRuns(list);
-      setSelected((cur) => cur ?? list[0]?.id ?? null);
     } catch (e) {
       toast("error", (e as Error).message);
     }
@@ -58,6 +60,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
   }, [reload]);
 
   const active = runs?.find((r) => ACTIVE.includes(r.state));
+  const selected = picked ?? runs?.[0]?.id ?? null;
   const current = runs?.find((r) => r.id === selected) ?? null;
 
   return (

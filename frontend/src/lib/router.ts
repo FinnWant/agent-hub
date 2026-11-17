@@ -12,20 +12,57 @@ function subscribe(fn: () => void) {
   };
 }
 
+/** Each in-app history entry remembers the page it was opened from, so pages can offer "Back to …". */
+type EntryState = { prev?: string };
+
+const here = () => location.pathname + location.search;
+
+/** Go to `path` (may include a query). Scrolls to the top only when the page itself changes. */
 export function navigate(path: string, replace = false) {
-  if (path === location.pathname) return;
-  history[replace ? "replaceState" : "pushState"](null, "", path);
+  if (path === here()) return;
+  const samePage = new URL(path, location.href).pathname === location.pathname;
+  const state: EntryState = replace ? { prev: previousPath() ?? undefined } : { prev: here() };
+  history[replace ? "replaceState" : "pushState"](state, "", path);
   listeners.forEach((fn) => fn());
-  window.scrollTo(0, 0);
+  if (!samePage) window.scrollTo(0, 0);
+}
+
+/** Where the current entry was opened from, within the app (null after a fresh load or a typed URL). */
+export function previousPath(): string | null {
+  return (history.state as EntryState | null)?.prev ?? null;
+}
+
+/** Back to the page this one was opened from; `fallback` when there is none (opened directly). */
+export function goBack(fallback: string) {
+  if (previousPath()) history.back();
+  else navigate(fallback);
 }
 
 export function usePath(): string {
   return useSyncExternalStore(subscribe, () => location.pathname);
 }
 
+/** The query string's parameters; re-renders when they change. */
+export function useQuery(): URLSearchParams {
+  const search = useSyncExternalStore(subscribe, () => location.search);
+  return new URLSearchParams(search);
+}
+
+/** The current URL with some query parameters set (null or "" removes one). */
+export function withQuery(params: Record<string, string | null>, path = location.pathname): string {
+  const q = new URLSearchParams(location.search);
+  if (path !== location.pathname) q.forEach((_, k) => q.delete(k));
+  for (const [k, v] of Object.entries(params)) {
+    if (v) q.set(k, v);
+    else q.delete(k);
+  }
+  const s = q.toString();
+  return s ? `${path}?${s}` : path;
+}
+
 export type Route =
   | { name: "home" }
-  | { name: "sandbox"; id: string }
+  | { name: "sandbox"; id: string; tab: string | null }
   | { name: "audit" }
   | { name: "needsYou" }
   | { name: "notFound" };
@@ -34,8 +71,8 @@ export function match(path: string): Route {
   if (path === "/" || path === "/sandboxes") return { name: "home" };
   if (path === "/audit") return { name: "audit" };
   if (path === "/needs-you") return { name: "needsYou" };
-  const m = path.match(/^\/sandboxes\/([A-Za-z0-9]+)\/?$/);
-  if (m) return { name: "sandbox", id: m[1] };
+  const m = path.match(/^\/sandboxes\/([A-Za-z0-9]+)(?:\/([a-z]+))?\/?$/);
+  if (m) return { name: "sandbox", id: m[1], tab: m[2] ?? null };
   return { name: "notFound" };
 }
 
@@ -49,7 +86,7 @@ export function useLinkInterception() {
       const url = new URL(a.href, location.href);
       if (url.origin !== location.origin || url.pathname.startsWith("/api/")) return;
       e.preventDefault();
-      navigate(url.pathname);
+      navigate(url.pathname + url.search);
     };
     document.addEventListener("click", onClick);
     return () => document.removeEventListener("click", onClick);

@@ -22,7 +22,7 @@ function NeedsYouLink({ current }: { current: boolean }) {
   const { items } = usePendingRequests();
   return (
     <a href="/needs-you" className="nav-item" aria-current={current ? "page" : undefined}>
-      <Icon name="inbox" /> Needs you
+      <Icon name="inbox" /> <span className="nav-label">Needs you</span>
       {items.length > 0 && <span className="count count-attention" aria-label={`${items.length} waiting`}>{items.length}</span>}
     </a>
   );
@@ -71,11 +71,11 @@ export default function App() {
             <span>Kiln</span>
           </a>
           <a href="/" className="nav-item" aria-current={route.name === "home" || route.name === "sandbox" ? "page" : undefined}>
-            <Icon name="box" /> Sandboxes
+            <Icon name="box" /> <span className="nav-label">Sandboxes</span>
           </a>
           <NeedsYouLink current={route.name === "needsYou"} />
           <a href="/audit" className="nav-item" aria-current={route.name === "audit" ? "page" : undefined}>
-            <Icon name="list" /> Audit log
+            <Icon name="list" /> <span className="nav-label">Audit log</span>
           </a>
           <div className="sidebar-foot">
             {health && (
@@ -89,14 +89,14 @@ export default function App() {
               aria-label="Notifications">
               <Icon name="bell" /> <span className="hide-sm">Notifications</span>
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={logout} style={{ justifyContent: "flex-start" }}>
-              <Icon name="logout" /> Log out
+            <button className="btn btn-ghost btn-sm" onClick={logout} style={{ justifyContent: "flex-start" }} aria-label="Log out">
+              <Icon name="logout" /> <span className="hide-sm">Log out</span>
             </button>
           </div>
         </nav>
         <main className="main" id="main">
           {route.name === "home" && <Home />}
-          {route.name === "sandbox" && <SandboxDetail id={route.id} />}
+          {route.name === "sandbox" && <SandboxDetail id={route.id} tab={route.tab} />}
           {route.name === "audit" && <Audit />}
           {route.name === "needsYou" && <NeedsYou />}
           {route.name === "notFound" && (

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, type Browse, type FileEntry, type Sandbox } from "../lib/api";
 import { bytes } from "../lib/format";
+import { navigate, useQuery, withQuery } from "../lib/router";
 import { Icon } from "./ui";
 
 function join(dir: string, name: string) {
@@ -11,7 +12,8 @@ function join(dir: string, name: string) {
 export default function Files({ sb }: { sb: Sandbox }) {
   const [dirs, setDirs] = useState<Record<string, Browse>>({});
   const [open, setOpen] = useState<Set<string>>(new Set([""]));
-  const [selected, setSelected] = useState<string | null>(null);
+  // The open file is in the URL (?file=), so Back returns to the file you were reading before.
+  const selected = useQuery().get("file");
   const [file, setFile] = useState<Browse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
@@ -43,20 +45,33 @@ export default function Files({ sb }: { sb: Sandbox }) {
     });
   };
 
-  const view = async (path: string) => {
-    setSelected(path);
+  const load = useCallback(async (path: string) => {
     setFile(null);
     try {
       setFile(await api.files(sb.id, path));
     } catch (e) {
       setFile({ path, kind: "other", size: 0, content: undefined, target: (e as Error).message });
     }
+  }, [sb.id]);
+
+  useEffect(() => {
+    if (!running || !selected) return;
+    load(selected);
+    // Show where the file is: open its folders in the tree.
+    const parts = selected.split("/").slice(0, -1);
+    const dirsOf = parts.map((_, i) => parts.slice(0, i + 1).join("/"));
+    setOpen((o) => new Set([...o, ...dirsOf]));
+    dirsOf.forEach(loadDir);
+  }, [running, selected, load, loadDir]);
+
+  const view = (path: string) => {
+    if (path !== selected) navigate(withQuery({ file: path }));
   };
 
   const refresh = () => {
     setDirs({});
     [...open].forEach(loadDir);
-    if (selected) view(selected);
+    if (selected) load(selected);
   };
 
   if (!running) {

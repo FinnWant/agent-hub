@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type OwnerRequest } from "../lib/api";
 import { ago } from "../lib/format";
 import { Icon, useToast } from "./ui";
+import { PageBack } from "./BackLink";
 
 /** Fired by the hub events stream when a run needs the owner; lists refresh on it. */
 export const NEEDS_YOU_EVENT = "kiln:needs-you";
@@ -77,7 +78,8 @@ export function RequestCard({ req, onDone, showSandbox = false }: {
       <div className="request-head">
         <span className="request-kind">{KIND_LABEL[req.kind]}</span>
         {showSandbox && req.sandbox_name && (
-          <a className="mono request-where" href={`/sandboxes/${req.sandbox_id}`}>{req.sandbox_name}</a>
+          <a className="mono request-where" href={`/sandboxes/${req.sandbox_id}/runs?run=${encodeURIComponent(req.run_id)}`}
+            title="Open the run">{req.sandbox_name}</a>
         )}
         <span className="muted request-when">
           {ago(req.created_at)}{pending && minutesLeft(req.deadline) ? ` · ${minutesLeft(req.deadline)}` : ""}
@@ -157,6 +159,7 @@ export function NeedsYou() {
   };
   return (
     <div className="page">
+      <PageBack />
       <div className="page-head">
         <div>
           <h1>Needs you</h1>

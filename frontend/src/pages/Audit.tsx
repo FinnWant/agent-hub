@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PageBack } from "../components/BackLink";
 import { api, type AuditEntry } from "../lib/api";
 import { clock } from "../lib/format";
 import { useTitle } from "../lib/router";
@@ -61,6 +62,7 @@ export default function Audit() {
 
   return (
     <div className="page">
+      <PageBack />
       <header className="page-head">
         <div>
           <h1>Audit log</h1>
