@@ -158,6 +158,13 @@ echo OK
 
 STATS_SCRIPT = """git diff --shortstat "$AH_BASE...$AH_BRANCH" 2>/dev/null; echo; git diff --name-only "$AH_BASE...$AH_BRANCH" 2>/dev/null | head -n 200"""
 
+# A branch fetched from upstream after the first clone (e.g. made on GitHub since), brought in as
+# a bundle so the sandbox never talks to the remote itself.
+FETCH_BRANCH_SCRIPT = """set -e
+git fetch -q --no-tags {bundle} "refs/heads/$AH_BASE:refs/remotes/origin/$AH_BASE"
+rm -f {bundle}
+"""
+
 DEFAULT_BRANCH_SCRIPT = """b=$(git symbolic-ref --short -q refs/remotes/origin/HEAD) && echo "${b#origin/}" && exit 0
 git symbolic-ref --short HEAD"""
 
@@ -261,14 +268,23 @@ class GitWorkspace:
             base = self._sh(sb, DEFAULT_BRANCH_SCRIPT).splitlines()[-1]
         if start_from and not BRANCH_RE.fullmatch(start_from):
             raise WorkspaceError(f"Can't continue from branch {start_from!r}")
-        out = self._sh(sb, BRANCH_SCRIPT, {"AH_BASE": base, "AH_BRANCH": run.branch or "", "AH_FROM": start_from or "",
-                                           "AH_GIT_NAME": s.git_author_name, "AH_GIT_EMAIL": s.git_author_email})
-        last = out.splitlines()[-1]
+        branch_env = {"AH_BASE": base, "AH_BRANCH": run.branch or "", "AH_FROM": start_from or "",
+                      "AH_GIT_NAME": s.git_author_name, "AH_GIT_EMAIL": s.git_author_email}
+        last = self._sh(sb, BRANCH_SCRIPT, branch_env).splitlines()[-1]
+        if last == "NOBASE" and sb.repo_url and state == "git":
+            # Cloned before the branch existed upstream: fetch just that branch and try again.
+            log(f"Base branch {base!r} isn't in the sandbox yet; fetching it from {sb.repo_url}")
+            bundle = self._host_branch_bundle(sb.repo_url, base)
+            p = Path(self.in_bundle)
+            self.backend.put_file(sb.container_id or "", str(p.parent), p.name, bundle)
+            self._sh(sb, FETCH_BRANCH_SCRIPT.format(bundle=self.in_bundle), {"AH_BASE": base})
+            last = self._sh(sb, BRANCH_SCRIPT, branch_env).splitlines()[-1]
         if last.startswith("DIRTY"):
             raise WorkspaceError(f"/workspace has uncommitted changes on {last[6:]}. Commit or discard "
                                  "them in the terminal first, so the agent starts from a clean tree.")
         if last == "NOBASE":
-            raise WorkspaceError(f"Base branch {base!r} doesn't exist in the repository.")
+            raise WorkspaceError(f"Base branch {base!r} doesn't exist in the repository"
+                                 + (f" ({sb.repo_url})." if sb.repo_url else "."))
         if last == "NOFROM":
             raise WorkspaceError(f"The previous run's branch {start_from} no longer exists in the sandbox.")
         log(f"On branch {run.branch} from {start_from or base}")
@@ -330,6 +346,25 @@ class GitWorkspace:
 
     def _git(self, args: list[str], home: str, cwd: str | None = None) -> str:
         return host_git(args, home, cwd, token=True)
+
+    def _host_branch_bundle(self, url: str, branch: str) -> bytes:
+        if not re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}", branch) or ".." in branch:
+            raise WorkspaceError(f"Not a valid branch name: {branch!r}")
+        with tempfile.TemporaryDirectory(prefix="ah-fetch-") as tmp:
+            try:
+                self._git(["clone", "--quiet", "--bare", "--single-branch", "--branch", branch, "--", url,
+                           f"{tmp}/repo.git"], home=tmp)
+            except WorkspaceError as e:
+                if "not found in upstream" in str(e):
+                    raise WorkspaceError(f"Base branch {branch!r} doesn't exist in {url}. Push it there "
+                                         "first, or change the sandbox's base branch.") from e
+                raise
+            self._git(["bundle", "create", "--quiet", f"{tmp}/repo.bundle", f"refs/heads/{branch}"],
+                      home=tmp, cwd=f"{tmp}/repo.git")
+            path = Path(f"{tmp}/repo.bundle")
+            if path.stat().st_size > MAX_BUNDLE:
+                raise WorkspaceError("Repository is larger than 1 GB")
+            return path.read_bytes()
 
     def _host_clone_bundle(self, url: str) -> bytes:
         with tempfile.TemporaryDirectory(prefix="ah-clone-") as tmp:

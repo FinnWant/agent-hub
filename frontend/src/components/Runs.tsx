@@ -62,6 +62,25 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
   }, [reload]);
 
   const active = runs?.find((r) => ACTIVE.includes(r.state));
+  const started = (run: Run) => {
+    setRuns((rs) => [run, ...(rs ?? [])]);
+    setSelected(run.id);
+    setContinuing(null);
+  };
+  // A fresh run of the same task: same prompt, agent and limits, new branch from the base.
+  const rerun = async (run: Run) => {
+    try {
+      started(await api.startRun(sb.id, {
+        prompt: run.prompt,
+        runner: run.runner,
+        timeout_minutes: Math.max(1, Math.round(run.timeout / 60)),
+        max_turns: run.max_turns,
+      }));
+    } catch (e) {
+      const err = e as ApiError;
+      toast("error", err.reasons?.length ? err.reasons.join(" ") : err.message);
+    }
+  };
   const selected = picked ?? runs?.[0]?.id ?? null;
   const current = runs?.find((r) => r.id === selected) ?? null;
 
@@ -70,11 +89,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
       <aside className="runs-side">
         <Composer sb={sb} system={system} busyRun={active ?? null} continuing={continuing}
           onClearContinue={() => setContinuing(null)}
-          onStarted={(run) => {
-            setRuns((rs) => [run, ...(rs ?? [])]);
-            setSelected(run.id);
-            setContinuing(null);
-          }} />
+          onStarted={started} />
         <div className="runs-side-tools">
           <LedgerButton sandboxId={sb.id} disabled={sb.state !== "running"} />
         </div>
@@ -101,7 +116,8 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
         {current ? (
           <RunView key={current.id} initial={current}
             onChange={(run) => setRuns((rs) => rs?.map((r) => (r.id === run.id ? run : r)) ?? rs)}
-            onContinue={active ? undefined : setContinuing} />
+            onContinue={active ? undefined : setContinuing}
+            onRerun={active || sb.state !== "running" ? undefined : rerun} />
         ) : (
           <div className="card empty" style={{ height: "100%", justifyContent: "center" }}>
             <h2>Give the agent a task</h2>
@@ -270,14 +286,16 @@ function useRunEvents(runId: string, onDone: () => void) {
   return { events, conn };
 }
 
-function RunView({ initial, onChange, onContinue }: {
+function RunView({ initial, onChange, onContinue, onRerun }: {
   initial: Run;
   onChange: (run: Run) => void;
   onContinue?: (run: Run) => void;
+  onRerun?: (run: Run) => Promise<void>;
 }) {
   const [run, setRun] = useState(initial);
   const [now, setNow] = useState(Date.now() / 1000);
   const [cancelling, setCancelling] = useState(false);
+  const [rerunning, setRerunning] = useState(false);
   const toast = useToast();
   const active = ACTIVE.includes(run.state);
 
@@ -403,6 +421,13 @@ function RunView({ initial, onChange, onContinue }: {
             <button className="btn btn-sm" onClick={() => onContinue(run)}
               title="Start a new run on top of this one's branch, in the same agent session">
               Continue
+            </button>
+          )}
+          {!active && onRerun && (
+            <button className="btn btn-sm" disabled={rerunning}
+              onClick={async () => { setRerunning(true); try { await onRerun(run); } finally { setRerunning(false); } }}
+              title="Run the same task again from scratch, on a new branch from the base">
+              {rerunning ? "Starting…" : "Rerun"}
             </button>
           )}
           {active && (

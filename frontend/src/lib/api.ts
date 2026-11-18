@@ -338,8 +338,8 @@ export const api = {
     approval_rules?: string }) =>
     request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
   runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),
-  startRun: (sandboxId: string, body: { prompt: string; timeout_minutes?: number; max_turns?: number;
-    continue_from?: string }) =>
+  startRun: (sandboxId: string, body: { prompt: string; runner?: string; timeout_minutes?: number;
+    max_turns?: number; continue_from?: string }) =>
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
   cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),

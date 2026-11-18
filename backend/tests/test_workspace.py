@@ -243,3 +243,26 @@ def test_kiln_folder_never_counts_as_a_change(env, origin):
     assert fin.commits == 0  # the ledger isn't committed
     w.prepare(sb, run("bbbbbbbbbbbb"), lambda _: None)  # and doesn't make the tree dirty
     assert (b.ws / ".kiln" / "LEDGER.md").exists()
+
+
+def test_base_branch_made_upstream_after_the_clone_is_fetched(env, origin, tmp_path):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = w.prepare(sb, r1, lambda _: None)  # clones trunk
+    # The owner makes a new branch on the remote afterwards.
+    work = tmp_path / "work"
+    git("clone", "-q", str(origin), str(work), cwd=tmp_path)
+    git("checkout", "-q", "-b", "feature/new", cwd=work)
+    (work / "feature.txt").write_text("f")
+    git("add", "-A", cwd=work)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "feature", cwd=work)
+    git("push", "-q", "origin", "feature/new", cwd=work)
+
+    sb2, r2, logs = dataclasses.replace(sb, base_branch="feature/new"), run("bbbbbbbbbbbb"), []
+    assert w.prepare(sb2, r2, logs.append) == "feature/new"
+    assert (b.ws / "feature.txt").exists()
+    assert any("fetching it" in line for line in logs)
+
+    with pytest.raises(WorkspaceError, match="doesn't exist in"):
+        w.prepare(dataclasses.replace(sb, base_branch="nope"), run("cccccccccccc"), lambda _: None)
