@@ -235,7 +235,7 @@ class SandboxService:
 
     def update_settings(self, sandbox_id: str, ip: str, *, allow_push: bool | None = None,
                         verify_cmd: str | None = None, budget_usd: float | None = None,
-                        approval_rules: str | None = None) -> Sandbox:
+                        approval_rules: str | None = None, base_branch: str | None = None) -> Sandbox:
         """verify_cmd: None leaves it, "" removes the checks."""
         sb = self.get(sandbox_id)
         changes: dict = {}
@@ -247,6 +247,11 @@ class SandboxService:
             changes["budget_usd"] = round(budget_usd, 2) or None
         if approval_rules is not None and (approval_rules.strip() or None) != sb.approval_rules:
             changes["approval_rules"] = approval_rules.strip() or None
+        if base_branch is not None and (base_branch.strip() or None) != sb.base_branch:
+            b = base_branch.strip()
+            if b and (".." in b or b.endswith((".", "/", ".lock")) or "//" in b):
+                raise SandboxError(f"Not a valid branch name: {b!r}")
+            changes["base_branch"] = b or None
         if changes:
             self.db.update_sandbox(sb, **changes)
             self.db.audit(ip, "sandbox.settings", sb.id, detail=changes)

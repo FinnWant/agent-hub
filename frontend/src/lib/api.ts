@@ -334,7 +334,7 @@ export const api = {
   start: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/start`),
   stop: (id: string) => request<Sandbox>("POST", `/sandboxes/${encodeURIComponent(id)}/stop`),
   destroy: (id: string) => request<void>("DELETE", `/sandboxes/${encodeURIComponent(id)}`),
-  updateSandbox: (id: string, body: { allow_push?: boolean; verify_cmd?: string; budget_usd?: number;
+  updateSandbox: (id: string, body: { allow_push?: boolean; verify_cmd?: string; budget_usd?: number; base_branch?: string;
     approval_rules?: string }) =>
     request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
   runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),

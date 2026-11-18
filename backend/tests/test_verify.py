@@ -129,3 +129,13 @@ def test_stop_hook_is_installed_only_where_there_are_checks(runs, svc, gated):
     assert spec.hooks["Stop"] == config.settings.verify_timeout + 60 and "PreCompact" in spec.hooks
     spec = runs._spec(dataclasses.replace(gated, verify_cmd=None), sb)
     assert "Stop" not in spec.hooks
+
+
+def test_settings_api_changes_the_base_branch(admin):
+    sb = make_sandbox(admin, repo_url="https://github.com/example/playground")
+    url = f"/api/sandboxes/{sb['id']}"
+    r = admin.patch(url, json={"base_branch": "feature/new"}, headers=CSRF)
+    assert r.status_code == 200 and r.json()["base_branch"] == "feature/new"
+    assert admin.patch(url, json={"base_branch": ""}, headers=CSRF).json()["base_branch"] is None
+    assert admin.patch(url, json={"base_branch": "-x"}, headers=CSRF).status_code == 422
+    assert admin.patch(url, json={"base_branch": "a..b"}, headers=CSRF).status_code >= 400

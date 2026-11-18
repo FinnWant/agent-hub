@@ -340,6 +340,8 @@ class SandboxSettings(BaseModel):
     verify_cmd: str | None = Field(default=None, max_length=1000)  # "" removes the checks
     budget_usd: float | None = Field(default=None, ge=0, le=10_000)  # per run; 0 removes it
     approval_rules: str | None = Field(default=None, max_length=5000)  # "" removes them
+    # "" goes back to the repository's default branch; applies from the next run.
+    base_branch: str | None = Field(default=None, pattern=r"^$|^[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}$")
 
 
 @app.patch("/api/sandboxes/{sandbox_id}")
@@ -347,7 +349,7 @@ def update_sandbox(sandbox_id: str, body: SandboxSettings, _: Admin, request: Re
                    runs: Runs) -> dict:
     sb = svc.update_settings(sandbox_id, auth.client_ip(request), allow_push=body.allow_push,
                              verify_cmd=body.verify_cmd, budget_usd=body.budget_usd,
-                             approval_rules=body.approval_rules)
+                             approval_rules=body.approval_rules, base_branch=body.base_branch)
     return sandbox_out(sb, runs)
 
 

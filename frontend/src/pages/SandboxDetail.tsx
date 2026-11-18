@@ -190,6 +190,7 @@ function Settings({ sb, system, onChanged, onDestroy }: {
         <button className="toggle" role="switch" aria-checked={sb.allow_push} aria-labelledby="push-label"
           disabled={saving || (!canPush && !sb.allow_push)} onClick={togglePush} />
       </div>
+      <BaseBranchSetting sb={sb} onChanged={onChanged} />
       <ChecksSetting sb={sb} onChanged={onChanged} />
       <OwnerSettings sb={sb} onChanged={onChanged} />
       <dl className="card kv">
@@ -197,7 +198,6 @@ function Settings({ sb, system, onChanged, onDestroy }: {
         <dt>Memory</dt><dd>{bytes(sb.memory)} (no swap)</dd>
         <dt>CPUs</dt><dd>{sb.cpus}</dd>
         <dt>Repository</dt><dd>{sb.repo_url ?? "none"}</dd>
-        <dt>Base branch</dt><dd>{sb.base_branch ?? "none"}</dd>
         <dt>Workspace</dt><dd>/workspace (kept across stop/start)</dd>
         <dt>Runs as</dt><dd>agent (uid 1000), no capabilities</dd>
         <dt>Network</dt><dd>Internet only; LAN, Tailscale and host blocked</dd>
@@ -212,6 +212,51 @@ function Settings({ sb, system, onChanged, onDestroy }: {
         </button>
       </div>
     </div>
+  );
+}
+
+const BRANCH_RE = /^[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}$/;
+
+function BaseBranchSetting({ sb, onChanged }: { sb: Sandbox; onChanged: () => void }) {
+  const toast = useToast();
+  const [value, setValue] = useState(sb.base_branch ?? "");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setValue(sb.base_branch ?? ""), [sb.base_branch]);
+  const v = value.trim();
+  const invalid = !!v && !BRANCH_RE.test(v);
+  const changed = v !== (sb.base_branch ?? "");
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.updateSandbox(sb.id, { base_branch: v });
+      toast("success", v ? `Base branch set to ${v}; it applies from the next run` : "Base branch cleared");
+      onChanged();
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form className="card checks-setting" onSubmit={(e) => { e.preventDefault(); if (!invalid) save(); }}>
+      <div>
+        <label htmlFor="base-branch"><strong>Base branch</strong></label>
+        <p>
+          The branch each new run starts from, and that its diff is compared against.
+          {sb.repo_url ? " If it isn't in the sandbox yet, it's fetched from the repository at the next run."
+            : " Leave it empty to use the workspace's current branch."}
+        </p>
+      </div>
+      <div className="checks-row">
+        <input id="base-branch" className="input mono" maxLength={100} spellCheck={false} autoComplete="off"
+          placeholder="the repository's default branch" value={value} aria-invalid={invalid}
+          onChange={(e) => setValue(e.target.value)} />
+        <button className="btn" type="submit" disabled={saving || !changed || invalid}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+      {invalid && <span className="error">Not a valid branch name</span>}
+    </form>
   );
 }
 
