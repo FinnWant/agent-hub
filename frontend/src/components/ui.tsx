@@ -46,12 +46,17 @@ export function Dialog({
   labelledBy?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Parents pass a fresh onClose on every render (and pages re-render on each poll). Read it
+  // through a ref so the effect below runs once on open; re-running it would yank focus
+  // back to the first field mid-typing.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
     const first = ref.current?.querySelector<HTMLElement>("[autofocus], input, select, textarea, button");
     first?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
       if (e.key === "Tab" && ref.current) {
         // keep focus inside the dialog
         const items = ref.current.querySelectorAll<HTMLElement>(
@@ -73,7 +78,7 @@ export function Dialog({
       document.removeEventListener("keydown", onKey);
       prev?.focus?.();
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div className="dialog-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
