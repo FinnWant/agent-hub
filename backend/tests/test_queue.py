@@ -152,3 +152,40 @@ def test_sync_endpoint(admin, runs):
     plain = make_sandbox(admin, name="plain")
     r = admin.post(f"/api/sandboxes/{plain['id']}/sync", headers=CSRF)
     assert r.status_code == 400 and "no repository" in r.json()["detail"]
+
+
+def test_new_runs_build_on_the_latest_work_unless_fresh(admin, runs, workspace):
+    sb = make_sandbox(admin, repo_url="https://github.com/example/playground")
+    first = wait_final(admin, start(admin, sb["id"], prompt="build the ticker").json()["id"])
+    second = wait_final(admin, start(admin, sb["id"], prompt="tweak it").json()["id"])
+    assert second["built_on"] == first["id"] and second["start_mode"] == "on"
+    assert workspace.built_on == first["branch"]
+    texts = [e.get("text", "") for e in admin.get(f"/api/runs/{second['id']}/log").json()]
+    assert any(first["branch"] in t for t in texts)
+
+    third = wait_final(admin, start(admin, sb["id"], prompt="other", fresh=True).json()["id"])
+    assert third["built_on"] is None and workspace.built_on is None
+    # Explicitly on an older run (what Rerun does).
+    again = wait_final(admin, start(admin, sb["id"], prompt="tweak it", build_on=first["id"]).json()["id"])
+    assert again["built_on"] == first["id"]
+
+
+def test_a_run_without_changes_puts_the_workspace_back(admin, runs, workspace):
+    sb = make_sandbox(admin)
+    first = wait_final(admin, start(admin, sb["id"]).json()["id"])
+    workspace.finalize_changes = False
+    idle = wait_final(admin, start(admin, sb["id"], prompt="just look").json()["id"])
+    assert idle["commit_sha"] is None and workspace.head_branch == first["branch"]
+    texts = [e.get("text", "") for e in admin.get(f"/api/runs/{idle['id']}/log").json()]
+    assert "No changes were made" in texts and any("back on" in t for t in texts)
+
+
+def test_preview_shows_and_switches_the_branch(admin, workspace):
+    sb = make_sandbox(admin)
+    first = wait_final(admin, start(admin, sb["id"]).json()["id"])
+    url = f"/api/sandboxes/{sb['id']}"
+    assert admin.get(f"{url}/preview").json()["branch"] == first["branch"]
+    assert admin.post(f"{url}/checkout", json={"branch": "main"}, headers=CSRF).json() == {"branch": "main"}
+    assert admin.get(f"{url}/preview").json()["branch"] == "main"
+    r = admin.post(f"{url}/checkout", json={"branch": "someone-elses"}, headers=CSRF)
+    assert r.status_code == 400

@@ -198,12 +198,31 @@ class RunManager:
 
     # ---- commands ------------------------------------------------------------
 
+    def latest_work(self, sandbox_id: str) -> Run | None:
+        """The newest succeeded run of the sandbox that committed something: by default a new run
+        builds on its work (unless that's in the base branch already, see workspace.prepare)."""
+        for r in self.db.list_runs(sandbox_id=sandbox_id, limit=50):
+            if r.state == "succeeded" and r.commit_sha and r.branch:
+                return r
+        return None
+
     def create(self, *, sandbox_id: str, prompt: str, runner: str, timeout: int | None,
-               max_turns: int | None, ip: str, continue_from: str | None = None) -> Run:
+               max_turns: int | None, ip: str, continue_from: str | None = None,
+               fresh: bool = False, build_on: str | None = None) -> Run:
         """Validate and record a run. Call `launch(run)` from the event loop afterwards.
         `continue_from`: a finished run of this sandbox whose branch (and agent session) the new
-        run picks up."""
+        run picks up. Otherwise the run starts from `build_on` (a run of this sandbox) or, unless
+        `fresh`, from the latest run's work (latest_work); else from the base branch."""
         s = config.settings
+        built_on = None
+        if continue_from is None and build_on is not None:
+            on = self.db.get_run(build_on)
+            if on is None or on.sandbox_id != sandbox_id or not on.branch:
+                raise NotFound("No such run in this sandbox to build on")
+            built_on = on.id
+        elif continue_from is None and not fresh:
+            on = self.latest_work(sandbox_id)
+            built_on = on.id if on else None
         if continue_from is not None:
             parent = self.db.get_run(continue_from)
             if parent is None or parent.sandbox_id != sandbox_id:
@@ -241,6 +260,7 @@ class RunManager:
                       timeout=min(timeout or s.run_timeout_default, s.run_timeout_max),
                       max_turns=min(max_turns or s.run_max_turns_default, s.run_max_turns_max),
                       branch=f"agent/{rid}", verify_cmd=sb.verify_cmd or None, parent_run_id=continue_from,
+                      built_on=built_on,
                       budget_usd=sb.budget_usd or None, approval_rules=sb.approval_rules or None)
             self.db.insert_run(run)
         self.db.audit(ip, "run.start", sandbox_id, detail={"run": rid, "runner": runner, "prompt": prompt[:200],
@@ -493,7 +513,9 @@ class RunManager:
                 stats = await asyncio.to_thread(self.workspace.stats, sb, run)
             except Exception:  # noqa: BLE001
                 log.info("no diff stats for run %s", run.id, exc_info=True)
-        fresh = self.db.get_run(run.id) or run
+        import dataclasses
+
+        fresh = dataclasses.replace(self.db.get_run(run.id) or run, state=run.state)
         report = build(fresh, self._last_result(run.id), stats, len(self.db.checkpoints(run.id)),
                        self.db.list_requests(run_id=run.id, limit=200), self.db.run_events(run.id))
         self.db.update_run(run, report=json.dumps(report))
@@ -665,14 +687,21 @@ class RunManager:
                 raise asyncio.CancelledError
             if resume is None:
                 parent = self.db.get_run(run.parent_run_id) if run.parent_run_id else None
+                on = self.db.get_run(run.built_on) if run.built_on else None
                 base = await asyncio.to_thread(self.workspace.prepare, sb, run, lambda t: self._sys(run, t),
-                                               parent.branch if parent else None)
-                self.db.update_run(run, base_branch=base)
+                                               parent.branch if parent else None, on.branch if on else None)
+                self.db.update_run(run, base_branch=base, start_mode=run.start_mode, start_sha=run.start_sha,
+                                   prev_head=run.prev_head,
+                                   built_on=run.built_on if run.start_mode == "on" else None)
                 if not sb.base_branch:
                     self.db.update_sandbox(sb, base_branch=base)
                 await self._ledger(sb, run)
                 if parent:
                     self._continue(spec, run, parent)
+                elif on and run.start_mode == "on":
+                    first = (on.prompt.strip().splitlines() or [""])[0][:300]
+                    spec.prompt = (f"[Kiln] This branch already has the work of an earlier run in this sandbox "
+                                   f"(it was asked: \"{first}\"); see the git log. Build on it.\n\n{spec.prompt}")
                 proc = await runner.start(spec)
                 if parent:
                     resumed = getattr(proc, "outcome", None) and proc.outcome.extra.get("resumed")
@@ -768,9 +797,11 @@ class RunManager:
         if run.base_branch:  # the branch exists: keep whatever the agent produced
             try:
                 fin = await asyncio.to_thread(self.workspace.finalize, sb, run, lambda t: self._sys(run, t))
-                commit = fin.commit_sha if fin.commits else None
-                if not fin.commits:
+                commit = fin.commit_sha if fin.changed else None
+                if not fin.changed:
                     self._sys(run, "No changes were made")
+                    if hasattr(self.workspace, "restore"):
+                        await asyncio.to_thread(self.workspace.restore, sb, run, lambda t: self._sys(run, t))
                 elif state == "succeeded" and run.verify == "failed":
                     if sb.allow_push:
                         self._sys(run, "Not pushed: the checks fail")
@@ -786,13 +817,16 @@ class RunManager:
 
         if error:
             error = Redactor.from_settings().text(error)[:1000]
-        self.db.update_run(run, state=state, error=error, finished_at=time.time(), commit_sha=commit,
+        self.db.update_run(run, error=error, finished_at=time.time(), commit_sha=commit,
                            pushed=pushed, exit_code=outcome.exit_code if outcome else None,
                            cost_usd=outcome.cost_usd if outcome else None,
                            num_turns=outcome.num_turns if outcome else None)
+        # The final state is stored last, so whoever sees the run finished also sees its report.
+        run.state = state
         if run.base_branch:
             await self._ledger(sb, run)
         await self._report(sb, run)
+        self.db.update_run(run, state=state)
         self.emit(run, {"type": "done", "state": state, "error": error, "commit": commit,
                         "branch": run.branch, "pushed": pushed})
         if self.on_finished:

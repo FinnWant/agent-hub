@@ -444,10 +444,42 @@ def run_diff(run_id: str, _: Admin, svc: Svc, runs: Runs) -> dict:
 
 
 @app.get("/api/sandboxes/{sandbox_id}/preview")
-def preview_status(sandbox_id: str, _: Admin, svc: Svc) -> dict:
-    if config.settings.demo_mode:
-        return demo.preview(svc.get(sandbox_id))
-    return preview_mod.status(svc.backend, svc.get(sandbox_id))
+def preview_status(sandbox_id: str, _: Admin, svc: Svc, runs: Runs) -> dict:
+    sb = svc.get(sandbox_id)
+    out = demo.preview(sb) if config.settings.demo_mode else preview_mod.status(svc.backend, sb)
+    out["branch"] = None
+    if sb.state == "running" and sb.container_id and hasattr(runs.workspace, "head"):
+        try:
+            out["branch"] = runs.workspace.head(sb)  # what the preview is serving
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+class Checkout(BaseModel):
+    branch: str = Field(min_length=1, max_length=120)
+
+
+@app.post("/api/sandboxes/{sandbox_id}/checkout")
+async def checkout(sandbox_id: str, body: Checkout, _: Admin, request: Request, svc: Svc, runs: Runs) -> dict:
+    """Switch /workspace to the base branch or one of this sandbox's run branches (e.g. to
+    preview that run's work)."""
+    from .workspace import WorkspaceError
+
+    sb = svc.get(sandbox_id)
+    if sb.state != "running" or not sb.container_id:
+        raise InvalidTransition("Start the sandbox first")
+    if runs.active_for(sandbox_id):
+        raise InvalidTransition("Wait for the run to finish")
+    allowed = {sb.base_branch} | {r.branch for r in svc.db.list_runs(sandbox_id=sandbox_id, limit=200) if r.branch}
+    if body.branch not in allowed:
+        raise SandboxError("Only the base branch or this sandbox's run branches can be checked out here")
+    try:
+        await asyncio.to_thread(runs.workspace.checkout, sb, body.branch)
+    except WorkspaceError as e:
+        raise SandboxError(str(e)) from e
+    svc.db.audit(auth.client_ip(request), "sandbox.checkout", sandbox_id, detail={"branch": body.branch})
+    return {"branch": body.branch}
 
 
 @app.post("/api/sandboxes/{sandbox_id}/preview/static")
@@ -595,6 +627,8 @@ class StartRun(BaseModel):
     timeout_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
     max_turns: int | None = Field(default=None, ge=1, le=10_000)
     continue_from: str | None = Field(default=None, pattern=r"^[0-9a-f]{12}$")  # a finished run's id
+    fresh: bool = False  # start from the base branch, not from the latest run's work
+    build_on: str | None = Field(default=None, pattern=r"^[0-9a-f]{12}$")  # start from this run's work
 
 
 @app.get("/api/sandboxes/{sandbox_id}/runs")
@@ -608,7 +642,7 @@ async def start_run(sandbox_id: str, body: StartRun, _: Admin, request: Request,
     run = await asyncio.to_thread(
         runs.create, sandbox_id=sandbox_id, prompt=body.prompt.strip(), runner=body.runner,
         timeout=body.timeout_minutes * 60 if body.timeout_minutes else None, max_turns=body.max_turns,
-        ip=auth.client_ip(request), continue_from=body.continue_from)
+        ip=auth.client_ip(request), continue_from=body.continue_from, fresh=body.fresh, build_on=body.build_on)
     runs.launch(run)
     return run_out(run)
 

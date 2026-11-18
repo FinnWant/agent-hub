@@ -268,7 +268,8 @@ def test_preview_status_and_static_server(admin, backend, previews):
     backend.exec_replies = [("/proc/net/tcp", ExecResult(0, PROC_NET + "AH_INDEX=yes\n", False, False))]
     st = admin.get(f"/api/sandboxes/{sb['id']}/preview").json()
     assert st == {"url": "http://box.tailnet.ts.net:8200/", "port": 8000, "host_port": 8200, "enabled": True,
-                  "listening": "any", "static_server": False, "has_index": True, "lists_directories": True}
+                  "listening": "any", "static_server": False, "has_index": True, "lists_directories": True,
+                  "branch": "main"}
     assert admin.post(f"/api/sandboxes/{sb['id']}/preview/static", headers=CSRF).status_code == 200
     started = [" ".join(c) for c, _ in backend.exec_calls if "setsid -f" in " ".join(c)]
     assert started and "setsid -f python3 -I /tmp/kiln-preview.py 8000" in started[0]

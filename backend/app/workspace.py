@@ -50,10 +50,16 @@ class Finalized:
     commit_sha: str | None
     commits: int        # commits on the run branch beyond the base
     committed_now: bool  # Kiln made a commit of leftover changes
+    new_commits: int = -1  # commits made during this run (beyond where it started); -1: as `commits`
+
+    @property
+    def changed(self) -> bool:
+        return (self.commits if self.new_commits < 0 else self.new_commits) > 0
 
 
 class Workspace(Protocol):
-    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str: ...
+    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None,
+                build_on: str | None = None) -> str: ...
     def sync(self, sb: Sandbox, base: str | None, log) -> str: ...
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized: ...
     def push(self, sb: Sandbox, run: Run, log, explicit: bool = False) -> bool: ...
@@ -100,6 +106,7 @@ grep -qxF '/.kiln/' .git/info/exclude 2>/dev/null || echo '/.kiln/' >> .git/info
 if [ -n "$(git status --porcelain)" ]; then
   echo "DIRTY $(git symbolic-ref --short -q HEAD || git rev-parse --short HEAD)"; exit 0
 fi
+prev=$(git symbolic-ref --short -q HEAD || git rev-parse HEAD)
 if ! git rev-parse -q --verify "refs/heads/$AH_BASE" >/dev/null; then
   if git rev-parse -q --verify "refs/remotes/origin/$AH_BASE" >/dev/null; then
     git branch -q --track "$AH_BASE" "origin/$AH_BASE"
@@ -107,13 +114,22 @@ if ! git rev-parse -q --verify "refs/heads/$AH_BASE" >/dev/null; then
     echo "NOBASE"; exit 0
   fi
 fi
+mode=base
 if [ -n "$AH_FROM" ]; then
   git rev-parse -q --verify "refs/heads/$AH_FROM" >/dev/null || { echo "NOFROM"; exit 0; }
-  git checkout -q -b "$AH_BRANCH" "$AH_FROM"
+  git checkout -q -b "$AH_BRANCH" "$AH_FROM"; mode=continue
+elif [ -n "$AH_ON" ] && git rev-parse -q --verify "refs/heads/$AH_ON" >/dev/null; then
+  # Build on an earlier run's work, unless it's already in the base branch (merged).
+  if git merge-base --is-ancestor "refs/heads/$AH_ON" "refs/heads/$AH_BASE"; then
+    git checkout -q -b "$AH_BRANCH" "$AH_BASE"; mode=merged
+  else
+    git checkout -q -b "$AH_BRANCH" "$AH_ON"; mode=on
+  fi
 else
+  [ -n "$AH_ON" ] && mode=gone
   git checkout -q -b "$AH_BRANCH" "$AH_BASE"
 fi
-echo OK
+echo "OK $mode $(git rev-parse HEAD) $prev"
 """
 
 FINALIZE_SCRIPT = """set -e
@@ -124,7 +140,25 @@ made=0
 if ! git diff --cached --quiet; then
   git -c core.hooksPath=/dev/null commit -q -m "$AH_MSG"; made=1
 fi
-echo "$made $(git rev-parse "$AH_BRANCH") $(git rev-list --count "$AH_BASE..$AH_BRANCH")"
+start=${AH_START:-$AH_BASE}
+echo "$made $(git rev-parse "$AH_BRANCH") $(git rev-list --count "$AH_BASE..$AH_BRANCH") $(git rev-list --count "$start..$AH_BRANCH")"
+"""
+
+# A run that changed nothing: put /workspace back on the branch it was on before the run, so
+# its work (e.g. the run before) is what the preview serves again.
+RESTORE_SCRIPT = """set -e
+[ -z "$(git status --porcelain)" ] || { echo DIRTY; exit 0; }
+git rev-parse -q --verify "$AH_PREV^{commit}" >/dev/null || { echo GONE; exit 0; }
+git checkout -q "$AH_PREV"
+echo OK
+"""
+
+# Switch /workspace to another branch (Preview tab), only from a clean tree.
+CHECKOUT_SCRIPT = """set -e
+git rev-parse -q --verify "refs/heads/$AH_TO" >/dev/null || { echo GONE; exit 0; }
+[ -z "$(git status --porcelain)" ] || { echo "DIRTY $(git symbolic-ref --short -q HEAD || echo HEAD)"; exit 0; }
+git checkout -q "$AH_TO"
+echo OK
 """
 
 # A checkpoint: the whole working tree (untracked files too, ignored ones not) as a commit on top
@@ -282,10 +316,13 @@ class GitWorkspace:
             raise WorkspaceError(r.output.strip()[-500:] or f"git step failed ({r.exit_code})")
         return r.output.strip()
 
-    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str:
+    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None,
+                build_on: str | None = None) -> str:
         """Clone or init /workspace if needed and check out the run's branch: from the base
-        branch, or from `start_from` (a previous run's branch, when continuing it). Returns the
-        base branch, which the diff and push compare against either way."""
+        branch, from `start_from` (a previous run's branch, when continuing it), or from
+        `build_on` (an earlier run's branch whose work isn't in the base yet). Returns the base
+        branch, which the diff and push compare against either way. Sets run.start_sha (where the
+        branch started), run.prev_head (what was checked out before) and run.start_mode."""
         s = config.settings
         state = self._sh(sb, STATE_SCRIPT).splitlines()[-1]
         base = sb.base_branch
@@ -307,6 +344,8 @@ class GitWorkspace:
             base = self._sh(sb, DEFAULT_BRANCH_SCRIPT).splitlines()[-1]
         if start_from and not BRANCH_RE.fullmatch(start_from):
             raise WorkspaceError(f"Can't continue from branch {start_from!r}")
+        if build_on and not BRANCH_RE.fullmatch(build_on):
+            build_on = None
         if state == "git" and sb.repo_url:
             # Cloned earlier: bring the base branch up to date with the remote first (or fetch
             # it, if it was made there since). Not reaching the remote isn't fatal.
@@ -315,7 +354,7 @@ class GitWorkspace:
             except WorkspaceError as e:
                 log(f"Couldn't update {base} from {sb.repo_url}, so the run starts from the sandbox's copy: {e}")
         branch_env = {"AH_BASE": base, "AH_BRANCH": run.branch or "", "AH_FROM": start_from or "",
-                      "AH_GIT_NAME": s.git_author_name, "AH_GIT_EMAIL": s.git_author_email}
+                      "AH_ON": build_on or "", "AH_GIT_NAME": s.git_author_name, "AH_GIT_EMAIL": s.git_author_email}
         last = self._sh(sb, BRANCH_SCRIPT, branch_env).splitlines()[-1]
         if last.startswith("DIRTY"):
             raise WorkspaceError(f"/workspace has uncommitted changes on {last[6:]}. Commit or discard "
@@ -326,7 +365,16 @@ class GitWorkspace:
                                     "base branch in Settings." if sb.repo_url else "."))
         if last == "NOFROM":
             raise WorkspaceError(f"The previous run's branch {start_from} no longer exists in the sandbox.")
-        log(f"On branch {run.branch} from {start_from or base}")
+        _, mode, sha, prev = (last.split() + ["", "", ""])[:4]
+        run.start_mode, run.start_sha, run.prev_head = mode, sha or None, prev or None
+        if mode == "on":
+            log(f"On branch {run.branch}, building on the work of {build_on}")
+        elif mode == "merged":
+            log(f"{build_on}'s work is already in {base}; on branch {run.branch} from {base}")
+        elif mode == "gone":
+            log(f"{build_on} is no longer in the sandbox; on branch {run.branch} from {base}")
+        else:
+            log(f"On branch {run.branch} from {start_from or base}")
         return base
 
     def sync(self, sb: Sandbox, base: str | None, log) -> str:
@@ -411,11 +459,34 @@ class GitWorkspace:
 
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized:
         out = self._sh(sb, FINALIZE_SCRIPT, {"AH_BRANCH": run.branch or "", "AH_BASE": run.base_branch or "",
+                                             "AH_START": getattr(run, "start_sha", None) or "",
                                              "AH_MSG": commit_message(run)})
-        made, sha, count = out.splitlines()[-1].split()
+        made, sha, count, new = out.splitlines()[-1].split()
         if made == "1":
             log(f"Committed the agent's changes as {sha[:10]}")
-        return Finalized(commit_sha=sha, commits=int(count), committed_now=made == "1")
+        return Finalized(commit_sha=sha, commits=int(count), committed_now=made == "1", new_commits=int(new))
+
+    def restore(self, sb: Sandbox, run: Run, log) -> None:
+        """After a run that changed nothing: back to what was checked out before it."""
+        prev = getattr(run, "prev_head", None)
+        if not prev or prev == run.branch or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", prev):
+            return
+        if self._sh(sb, RESTORE_SCRIPT, {"AH_PREV": prev}).splitlines()[-1] == "OK":
+            log(f"/workspace is back on {prev}, as before the run")
+
+    def head(self, sb: Sandbox) -> str | None:
+        """The branch /workspace has checked out (None: detached or no repository)."""
+        out = self._sh(sb, "[ -d .git ] && git symbolic-ref --short -q HEAD; true", timeout=15)
+        return out.splitlines()[-1].strip() if out.strip() else None
+
+    def checkout(self, sb: Sandbox, branch: str) -> None:
+        if not valid_branch(branch):
+            raise WorkspaceError(f"Not a valid branch name: {branch!r}")
+        last = self._sh(sb, CHECKOUT_SCRIPT, {"AH_TO": branch}).splitlines()[-1]
+        if last == "GONE":
+            raise WorkspaceError(f"Branch {branch} isn't in the sandbox")
+        if last.startswith("DIRTY"):
+            raise WorkspaceError(f"/workspace has uncommitted changes on {last[6:]}; commit or discard them first")
 
     def checkpoint(self, sb: Sandbox, run: Run, n: int) -> tuple[str, list[str]] | None:
         """(commit, files changed since the previous checkpoint), or None if nothing changed."""
@@ -485,15 +556,23 @@ class FakeWorkspace:
         self.pushed: list[str] = []
         self.fail_prepare: str | None = None
         self.started_from: str | None = None
+        self.built_on: str | None = None
+        self.head_branch: str | None = "main"
+        self.finalize_changes = True  # False: the agent changed nothing
 
-    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str:
+    def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None,
+                build_on: str | None = None) -> str:
         if self.fail_prepare:
             raise WorkspaceError(self.fail_prepare)
         if sb.repo_url and not start_from:
             log(f"Cloning {sb.repo_url}")
         base = sb.base_branch or "main"
         self.started_from = start_from
-        log(f"On branch {run.branch} from {start_from or base}")
+        self.built_on = build_on
+        run.start_mode = "continue" if start_from else "on" if build_on else "base"
+        run.start_sha, run.prev_head = "f" * 40, self.head_branch
+        self.head_branch = run.branch
+        log(f"On branch {run.branch} from {start_from or build_on or base}")
         return base
 
     def sync(self, sb: Sandbox, base: str | None, log) -> str:
@@ -521,8 +600,21 @@ class FakeWorkspace:
 
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized:
         sha = (run.id * 4)[:40]
+        if not self.finalize_changes:
+            return Finalized(commit_sha=sha, commits=0, committed_now=False, new_commits=0)
         log(f"Committed the agent's changes as {sha[:10]}")
-        return Finalized(commit_sha=sha, commits=1, committed_now=True)
+        return Finalized(commit_sha=sha, commits=1, committed_now=True, new_commits=1)
+
+    def restore(self, sb: Sandbox, run: Run, log) -> None:
+        if run.prev_head and run.prev_head != run.branch:
+            self.head_branch = run.prev_head
+            log(f"/workspace is back on {run.prev_head}, as before the run")
+
+    def head(self, sb: Sandbox) -> str | None:
+        return self.head_branch
+
+    def checkout(self, sb: Sandbox, branch: str) -> None:
+        self.head_branch = branch
 
     def push(self, sb: Sandbox, run: Run, log, explicit: bool = False) -> bool:
         if not ((sb.allow_push or explicit) and sb.repo_url):

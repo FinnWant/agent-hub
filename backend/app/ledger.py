@@ -61,6 +61,8 @@ def kiln_block(manager: RunManager, sb: Sandbox, current: Run) -> str:
 
     lines = [BEGIN, "## Latest request", "", current.prompt.strip()[:2000], "", "## Runs (newest first)", ""]
     for r in manager.db.list_runs(sandbox_id=sb.id, limit=15):
+        if r.id == current.id:
+            r = current  # its final state may not be stored yet (runs.py stores it last)
         when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(r.created_at))
         what = "running now" if r.active else outcome(r)
         extra = []

@@ -317,3 +317,48 @@ def test_remote_unreachable_still_runs_from_the_sandbox_copy(env, origin, tmp_pa
     logs = []
     assert w.prepare(gone, run("bbbbbbbbbbbb"), logs.append) == "trunk"
     assert any("Couldn't update trunk" in line for line in logs)
+
+
+def test_a_new_run_builds_on_the_last_runs_work_until_it_is_merged(env, origin, tmp_path):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    (b.ws / "ticker.js").write_text("ticker")
+    assert w.finalize(sb, r1, lambda _: None).changed
+
+    r2, logs = run("bbbbbbbbbbbb"), []
+    r2.base_branch = w.prepare(sb, r2, logs.append, None, r1.branch)
+    assert r2.start_mode == "on" and (b.ws / "ticker.js").exists()
+    assert any("building on the work of agent/aaaaaaaaaaaa" in line for line in logs)
+    fin = w.finalize(sb, r2, lambda _: None)
+    assert fin.commits == 1 and fin.new_commits == 0 and not fin.changed  # r1's commit isn't r2's
+
+    # r2 changed nothing: /workspace goes back to what it had before (r1's branch).
+    logs = []
+    w.restore(sb, r2, logs.append)
+    assert git("symbolic-ref", "--short", "HEAD", cwd=b.ws) == r1.branch and "back on" in logs[-1]
+
+    # Once r1's work is merged on the remote, the next run starts from the base again.
+    git("push", "-q", str(origin), f"{r1.branch}:trunk", cwd=b.ws)
+    r3 = run("cccccccccccc")
+    w.prepare(sb, r3, lambda _: None, None, r1.branch)
+    assert r3.start_mode == "merged" and (b.ws / "ticker.js").exists()  # it's in trunk now
+
+
+def test_checkout_switches_the_workspace_branch(env, origin):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    (b.ws / "page.html").write_text("p")
+    w.finalize(sb, r1, lambda _: None)
+    w.checkout(sb, "trunk")
+    assert w.head(sb) == "trunk" and not (b.ws / "page.html").exists()
+    w.checkout(sb, r1.branch)
+    assert w.head(sb) == r1.branch and (b.ws / "page.html").exists()
+    (b.ws / "dirty.txt").write_text("d")
+    with pytest.raises(WorkspaceError, match="uncommitted"):
+        w.checkout(sb, "trunk")
+    with pytest.raises(WorkspaceError, match="isn't in the sandbox"):
+        (b.ws / "dirty.txt").unlink() or w.checkout(sb, "agent/ffffffffffff")

@@ -79,6 +79,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
       started(await api.startRun(sb.id, {
         prompt: run.prompt,
         runner: run.runner,
+        ...(run.built_on ? { build_on: run.built_on } : { fresh: true }),
         timeout_minutes: Math.max(1, Math.round(run.timeout / 60)),
         max_turns: run.max_turns,
       }));
@@ -88,13 +89,14 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
     }
   };
   const selected = picked ?? runs?.[0]?.id ?? null;
+  const latestWork = runs?.find((r) => r.state === "succeeded" && r.commit_sha && r.branch) ?? null;
   const pushable = !!sb.repo_url && /^https:\/\/github\.com\//.test(sb.repo_url) && !!system?.agent.github_token;
   const current = runs?.find((r) => r.id === selected) ?? null;
 
   return (
     <div className="runs">
       <aside className="runs-side">
-        <Composer sb={sb} system={system} busyRun={active ?? null} continuing={continuing}
+        <Composer sb={sb} system={system} busyRun={active ?? null} continuing={continuing} latestWork={latestWork}
           onClearContinue={() => setContinuing(null)}
           onStarted={started} onQueued={onQueue} />
         {queue && (queue.items.length > 0 || queue.paused) && (
@@ -115,6 +117,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
               <span className="run-item-meta">
                 {STATE_LABEL[r.state]} · {ago(r.created_at)}
                 {r.parent_run_id && ` · continues ${r.parent_run_id.slice(0, 6)}`}
+                {r.built_on && ` · builds on ${r.built_on.slice(0, 6)}`}
                 {r.verify && ` · checks ${r.verify === "passed" ? "pass" : "fail"}`}
                 {r.cost_usd != null && ` · $${r.cost_usd.toFixed(2)}`}
               </span>
@@ -145,11 +148,12 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
 
 /* ---------------------------------------------------------------- Composer */
 
-function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted, onQueued }: {
+function Composer({ sb, system, busyRun, continuing, latestWork, onClearContinue, onStarted, onQueued }: {
   sb: Sandbox;
   system: SystemInfo | null;
   busyRun: Run | null;
   continuing: Run | null;
+  latestWork: Run | null;
   onClearContinue: () => void;
   onStarted: (run: Run) => void;
   onQueued: (q: TaskQueue) => void;
@@ -163,6 +167,8 @@ function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted,
   const [turns, setTurns] = useState<number | "">("");
   const [advanced, setAdvanced] = useState(false);
   const [carryOn, setCarryOn] = useState(false);
+  const [fresh, setFresh] = useState(false);
+  const base = sb.base_branch ?? "the base branch";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const agent = system?.agent;
@@ -191,9 +197,10 @@ function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted,
       const run = await api.startRun(sb.id, {
         prompt: prompt.trim(),
         ...limits,
-        ...(continuing ? { continue_from: continuing.id } : {}),
+        ...(continuing ? { continue_from: continuing.id } : fresh ? { fresh: true } : {}),
       });
       setPrompt("");
+      setFresh(false);
       onStarted(run);
     } catch (e) {
       const err = e as ApiError;
@@ -232,10 +239,22 @@ function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted,
           : continuing ? "What should the agent do next?"
           : sb.repo_url ? "e.g. Add a README section describing this project" : "Describe what the agent should build or change"}
         value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKey} disabled={!!blocked} />
+      {!queueing && !continuing && latestWork && (
+        <div className="composer-builds">
+          <span title={latestWork.prompt}>
+            {fresh ? <>Starts fresh from <span className="mono">{base}</span></>
+              : <>Builds on <span className="mono">{latestWork.id.slice(0, 6)}</span>: {latestWork.prompt.split("\n")[0]}</>}
+          </span>
+          <label className="composer-check">
+            <input type="checkbox" checked={fresh} onChange={(e) => setFresh(e.target.checked)} />
+            Start fresh from {base}
+          </label>
+        </div>
+      )}
       {queueing && (
         <label className="composer-check">
           <input type="checkbox" checked={carryOn} onChange={(e) => setCarryOn(e.target.checked)} />
-          Continue the run before it (same branch and session) instead of starting fresh
+          Continue the run before it (same agent session) instead of a new session on its work
         </label>
       )}
       {advanced && (

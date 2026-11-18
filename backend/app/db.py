@@ -152,6 +152,10 @@ MIGRATIONS = [
     ("runs", "pr_url", "TEXT"),                 # the pull request opened for the run's branch
     ("sandboxes", "queue_paused", "INTEGER NOT NULL DEFAULT 0"),  # don't start queued tasks
     ("sandboxes", "queue_note", "TEXT"),        # why the queue paused itself
+    ("runs", "built_on", "TEXT"),               # the earlier run whose work this one started from
+    ("runs", "start_mode", "TEXT"),             # base | continue | on | merged | gone (workspace.prepare)
+    ("runs", "start_sha", "TEXT"),              # where the run's branch started
+    ("runs", "prev_head", "TEXT"),              # what /workspace had checked out before the run
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -224,6 +228,10 @@ class Run:
     report: str | None = None
     rewound_to: int | None = None
     pr_url: str | None = None
+    built_on: str | None = None
+    start_mode: str | None = None
+    start_sha: str | None = None
+    prev_head: str | None = None
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)

@@ -293,6 +293,18 @@ queued → running → succeeded | failed | cancelled | timed_out
 Every log line is redacted for known secrets (and common token shapes) before it is stored or
 streamed.
 
+### Where a run starts, and what the preview shows
+
+- A new run **builds on the latest succeeded run that made changes**: its branch starts from
+  that run's branch, and the agent is told so. Once that work is in the base branch (merged,
+  then synced), runs start from the base again. Tick **Start fresh** in the composer to start
+  from the base branch anyway; **Continue** also resumes the earlier agent session. Rerun
+  starts from wherever the original run started.
+- A run that changes nothing puts `/workspace` back on the branch it had before, so it doesn't
+  hide earlier work.
+- The preview serves whatever `/workspace` has checked out. The Preview tab says which branch
+  that is and switches to the base branch or any run's branch.
+
 ### Keeping up with GitHub, pull requests and the queue
 
 - **Sync:** before each run, the sandbox's base branch is brought up to date with the remote.

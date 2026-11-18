@@ -694,7 +694,7 @@ class DemoProcess:
         return evs
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
-        if self.spec.prompt.strip() == "fail":
+        if (self.spec.prompt.strip().splitlines() or [""])[-1] == "fail":  # after any [Kiln] note
             self._done = True
             yield {"type": "log", "kind": "error", "text": "Simulated failure"}
             self.outcome = Outcome(exit_code=1, is_error=True, error="Simulated failure")

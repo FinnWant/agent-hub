@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type PreviewStatus, type Sandbox } from "../lib/api";
+import { api, type PreviewStatus, type Run, type Sandbox } from "../lib/api";
 import { Icon, useToast } from "./ui";
 
 const HINTS: Record<string, { label: string; cmd: string }[]> = {
@@ -96,6 +96,8 @@ export default function Preview({ sb }: { sb: Sandbox }) {
         </div>
       </div>
 
+      <BranchCard sb={sb} branch={st.branch ?? null} onChanged={load} />
+
       {st.static_server && !st.has_index && !st.lists_directories && (
         <div className="banner banner-warning" style={{ marginTop: 16 }}>
           <div>
@@ -134,6 +136,66 @@ export default function Preview({ sb }: { sb: Sandbox }) {
         <p className="muted" style={{ margin: "12px 0 0", fontSize: 12 }}>
           Previews are reachable only over Tailscale. Your ACL needs <span className="mono">tcp:8200-8299</span> for this server.
         </p>
+      </div>
+    </div>
+  );
+}
+
+/** What /workspace has checked out (so what the preview serves), and a switch to another run's work. */
+function BranchCard({ sb, branch, onChanged }: { sb: Sandbox; branch: string | null; onChanged: () => void }) {
+  const toast = useToast();
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api.runs(sb.id).then(setRuns).catch(() => {});
+  }, [sb.id, branch]);
+  if (sb.state !== "running") return null;
+
+  const withWork = runs.filter((r) => r.branch && r.commit_sha && !["queued", "running"].includes(r.state));
+  const options: { value: string; label: string }[] = [];
+  if (sb.base_branch) options.push({ value: sb.base_branch, label: `${sb.base_branch} (base branch)` });
+  for (const r of withWork) {
+    options.push({ value: r.branch!, label: `${r.id.slice(0, 6)} · ${r.prompt.split("\n")[0].slice(0, 60)}` });
+  }
+  if (branch && !options.some((o) => o.value === branch)) {
+    const r = runs.find((x) => x.branch === branch);
+    options.unshift({ value: branch, label: r ? `${r.id.slice(0, 6)} · ${r.prompt.split("\n")[0].slice(0, 60)} (no changes)` : branch });
+  }
+  const current = runs.find((r) => r.branch === branch);
+  const latest = withWork[0];
+
+  const switchTo = async (to: string) => {
+    if (!to || to === branch) return;
+    setBusy(true);
+    try {
+      await api.checkout(sb.id, to);
+      toast("success", "Switched; reload the preview to see it");
+      onChanged();
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card checks-setting" style={{ marginTop: 16 }}>
+      <div>
+        <label htmlFor="preview-branch"><strong>What it shows</strong></label>
+        <p>
+          The preview serves the files checked out in /workspace
+          {branch ? <>: <span className="mono">{branch}</span>{current ? ` (run ${current.id.slice(0, 6)})` : ""}.</> : "."}
+          {latest && branch !== latest.branch && (
+            <> The latest run with changes is <span className="mono">{latest.id.slice(0, 6)}</span>; switch to it to see its work.</>
+          )}
+        </p>
+      </div>
+      <div className="checks-row">
+        <select id="preview-branch" className="input" value={branch ?? ""} disabled={busy || options.length === 0}
+          onChange={(e) => switchTo(e.target.value)}>
+          {!branch && <option value="">(not on a branch)</option>}
+          {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
       </div>
     </div>
   );

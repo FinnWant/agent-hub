@@ -76,6 +76,10 @@ export interface Run {
   can_message: boolean;
   /** The pull request opened for the run's branch. */
   pr_url: string | null;
+  /** The earlier run whose work this run's branch started from. */
+  built_on: string | null;
+  /** base | continue | on | merged (built_on's work was already in the base) | gone */
+  start_mode: string | null;
 }
 
 export interface QueuedTask {
@@ -204,6 +208,8 @@ export interface PreviewStatus {
   static_server?: boolean;
   has_index?: boolean;
   lists_directories?: boolean;
+  /** The branch /workspace has checked out: what the preview serves. */
+  branch?: string | null;
 }
 
 export interface PruneResult {
@@ -365,10 +371,12 @@ export const api = {
     request<Sandbox>("PATCH", `/sandboxes/${encodeURIComponent(id)}`, body),
   runs: (sandboxId: string) => request<Run[]>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`),
   startRun: (sandboxId: string, body: { prompt: string; runner?: string; timeout_minutes?: number;
-    max_turns?: number; continue_from?: string }) =>
+    max_turns?: number; continue_from?: string; fresh?: boolean; build_on?: string }) =>
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
   openPr: (id: string, draft = false) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/pr`, { draft }),
+  checkout: (id: string, branch: string) =>
+    request<{ branch: string }>("POST", `/sandboxes/${encodeURIComponent(id)}/checkout`, { branch }),
   syncSandbox: (id: string) => request<{ message: string }>("POST", `/sandboxes/${encodeURIComponent(id)}/sync`),
   queue: (sandboxId: string) => request<TaskQueue>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/queue`),
   enqueue: (sandboxId: string, body: { prompt: string; runner?: string; timeout_minutes?: number; max_turns?: number;
