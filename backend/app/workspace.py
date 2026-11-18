@@ -54,8 +54,9 @@ class Finalized:
 
 class Workspace(Protocol):
     def prepare(self, sb: Sandbox, run: Run, log, start_from: str | None = None) -> str: ...
+    def sync(self, sb: Sandbox, base: str | None, log) -> str: ...
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized: ...
-    def push(self, sb: Sandbox, run: Run, log) -> bool: ...
+    def push(self, sb: Sandbox, run: Run, log, explicit: bool = False) -> bool: ...
 
 
 def parse_stats(out: str) -> dict:
@@ -158,11 +159,34 @@ echo OK
 
 STATS_SCRIPT = """git diff --shortstat "$AH_BASE...$AH_BRANCH" 2>/dev/null; echo; git diff --name-only "$AH_BASE...$AH_BRANCH" 2>/dev/null | head -n 200"""
 
-# A branch fetched from upstream after the first clone (e.g. made on GitHub since), brought in as
-# a bundle so the sandbox never talks to the remote itself.
-FETCH_BRANCH_SCRIPT = """set -e
-git fetch -q --no-tags {bundle} "refs/heads/$AH_BASE:refs/remotes/origin/$AH_BASE"
-rm -f {bundle}
+# Keeping the base branch up to date with the remote. The sandbox never talks to the remote
+# itself: the host fetches into its own cache (sync_cache) and only the new commits come in, as a
+# bundle. First the commits the sandbox already has, so the bundle can leave them out:
+SYNC_HAVE_SCRIPT = """git rev-parse -q --verify "refs/remotes/origin/$AH_BASE^{commit}" || echo -
+git rev-parse -q --verify "refs/heads/$AH_BASE^{commit}" || echo -
+"""
+
+# Then bring the remote's branch in as origin/<base> and fast-forward the local base branch to it.
+# A local base branch with commits of its own is left alone (AHEAD / DIVERGED).
+SYNC_SCRIPT = """set -e
+if [ -n "$AH_BUNDLE" ]; then
+  git fetch -q --no-tags "$AH_BUNDLE" "+refs/heads/$AH_BASE:refs/remotes/origin/$AH_BASE"
+  rm -f "$AH_BUNDLE"
+fi
+git update-ref "refs/remotes/origin/$AH_BASE" "$AH_TIP"
+remote=$(git rev-parse "refs/remotes/origin/$AH_BASE")
+local=$(git rev-parse -q --verify "refs/heads/$AH_BASE") || { echo NEW; exit 0; }
+[ "$local" = "$remote" ] && { echo SAME; exit 0; }
+if git merge-base --is-ancestor "$local" "$remote"; then
+  if [ "$(git symbolic-ref --short -q HEAD)" = "$AH_BASE" ]; then
+    [ -z "$(git status --porcelain)" ] || { echo DIRTY; exit 0; }
+    git -c core.hooksPath=/dev/null merge -q --ff-only "$remote"
+  else
+    git update-ref "refs/heads/$AH_BASE" "$remote" "$local"
+  fi
+  echo "FF $(git rev-list --count "$local..$remote")"; exit 0
+fi
+if git merge-base --is-ancestor "$remote" "$local"; then echo AHEAD; else echo DIVERGED; fi
 """
 
 DEFAULT_BRANCH_SCRIPT = """b=$(git symbolic-ref --short -q refs/remotes/origin/HEAD) && echo "${b#origin/}" && exit 0
@@ -225,10 +249,25 @@ def export_branch(backend: Backend, sb: Sandbox, branch: str, base: str | None, 
     return repo
 
 
+BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}$")
+
+
+def valid_branch(name: str) -> bool:
+    return bool(BRANCH_NAME_RE.fullmatch(name)) and ".." not in name and "//" not in name \
+        and not name.endswith((".", "/", ".lock"))
+
+
 class GitWorkspace:
-    def __init__(self, backend: Backend, in_bundle: str = IN_BUNDLE) -> None:
+    def __init__(self, backend: Backend, in_bundle: str = IN_BUNDLE, cache_dir: str | Path | None = None) -> None:
         self.backend = backend
         self.in_bundle = in_bundle
+        self._cache_dir = Path(cache_dir) if cache_dir else None
+
+    @property
+    def cache_dir(self) -> Path:
+        """Host-side mirrors of each sandbox's remote base branch (only what came from the remote;
+        nothing from a sandbox is ever written here)."""
+        return self._cache_dir or Path(config.settings.db_path).parent / "upstream"
 
     # ---- in the sandbox ------------------------------------------------------
 
@@ -268,27 +307,107 @@ class GitWorkspace:
             base = self._sh(sb, DEFAULT_BRANCH_SCRIPT).splitlines()[-1]
         if start_from and not BRANCH_RE.fullmatch(start_from):
             raise WorkspaceError(f"Can't continue from branch {start_from!r}")
+        if state == "git" and sb.repo_url:
+            # Cloned earlier: bring the base branch up to date with the remote first (or fetch
+            # it, if it was made there since). Not reaching the remote isn't fatal.
+            try:
+                self.sync(sb, base, log)
+            except WorkspaceError as e:
+                log(f"Couldn't update {base} from {sb.repo_url}, so the run starts from the sandbox's copy: {e}")
         branch_env = {"AH_BASE": base, "AH_BRANCH": run.branch or "", "AH_FROM": start_from or "",
                       "AH_GIT_NAME": s.git_author_name, "AH_GIT_EMAIL": s.git_author_email}
         last = self._sh(sb, BRANCH_SCRIPT, branch_env).splitlines()[-1]
-        if last == "NOBASE" and sb.repo_url and state == "git":
-            # Cloned before the branch existed upstream: fetch just that branch and try again.
-            log(f"Base branch {base!r} isn't in the sandbox yet; fetching it from {sb.repo_url}")
-            bundle = self._host_branch_bundle(sb.repo_url, base)
-            p = Path(self.in_bundle)
-            self.backend.put_file(sb.container_id or "", str(p.parent), p.name, bundle)
-            self._sh(sb, FETCH_BRANCH_SCRIPT.format(bundle=self.in_bundle), {"AH_BASE": base})
-            last = self._sh(sb, BRANCH_SCRIPT, branch_env).splitlines()[-1]
         if last.startswith("DIRTY"):
             raise WorkspaceError(f"/workspace has uncommitted changes on {last[6:]}. Commit or discard "
                                  "them in the terminal first, so the agent starts from a clean tree.")
         if last == "NOBASE":
-            raise WorkspaceError(f"Base branch {base!r} doesn't exist in the repository"
-                                 + (f" ({sb.repo_url})." if sb.repo_url else "."))
+            raise WorkspaceError(f"Base branch {base!r} doesn't exist in the sandbox"
+                                 + (f" or in {sb.repo_url}. Push it there first, or change the sandbox's "
+                                    "base branch in Settings." if sb.repo_url else "."))
         if last == "NOFROM":
             raise WorkspaceError(f"The previous run's branch {start_from} no longer exists in the sandbox.")
         log(f"On branch {run.branch} from {start_from or base}")
         return base
+
+    def sync(self, sb: Sandbox, base: str | None, log) -> str:
+        """Bring `base` (default: the sandbox's base branch) up to date with the remote. Returns a
+        sentence saying what happened. Raises WorkspaceError if the remote can't be reached or
+        doesn't have the branch."""
+        if not sb.repo_url:
+            raise WorkspaceError("This sandbox has no repository to sync with")
+        base = base or sb.base_branch
+        if not base:
+            raise WorkspaceError("Run the agent once first, so the repository is cloned")
+        if not valid_branch(base):
+            raise WorkspaceError(f"Not a valid branch name: {base!r}")
+        if self._sh(sb, STATE_SCRIPT).splitlines()[-1] != "git":
+            raise WorkspaceError("/workspace has no repository yet; it's cloned at the first run")
+        env = {"AH_BASE": base}
+        have = [x for x in self._sh(sb, SYNC_HAVE_SCRIPT, env).splitlines() if re.fullmatch(r"[0-9a-f]{40}", x)]
+        bundle, tip = self.sync_cache(sb, base, have)
+        if bundle is not None:
+            p = Path(self.in_bundle)
+            self.backend.put_file(sb.container_id or "", str(p.parent), p.name, bundle)
+        out = self._sh(sb, SYNC_SCRIPT, {**env, "AH_TIP": tip,
+                                         "AH_BUNDLE": self.in_bundle if bundle is not None else ""})
+        last = out.splitlines()[-1]
+        msg = {
+            "NEW": f"Fetched {base} from {sb.repo_url}",
+            "SAME": f"{base} is up to date with {sb.repo_url}",
+            "DIRTY": f"{base} has new commits on the remote, but /workspace has uncommitted changes on it; "
+                     "not updated",
+            "AHEAD": f"{base} in the sandbox has commits the remote doesn't; kept as it is",
+            "DIVERGED": f"{base} in the sandbox and on the remote have both changed; kept the sandbox's copy. "
+                        "Reset it in the terminal (git reset --hard origin/" + base + ") to use the remote's.",
+        }.get(last)
+        if msg is None and last.startswith("FF "):
+            n = int(last[3:])
+            msg = f"Updated {base} with {n} new commit{'s' if n != 1 else ''} from {sb.repo_url}"
+        log(msg or f"Sync of {base} said: {last}")
+        return msg or last
+
+    def sync_cache(self, sb: Sandbox, base: str, have: list[str]) -> tuple[bytes | None, str]:
+        """Fetch `base` from the remote into this sandbox's host cache. Returns a bundle of what the
+        sandbox is missing (None: it has every commit already) and the remote's tip."""
+        self.cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        repo = self.cache_dir / f"{sb.id}.git"
+        with tempfile.TemporaryDirectory(prefix="ah-sync-") as tmp:
+            if not (repo / "HEAD").exists():
+                host_git(["init", "--quiet", "--bare", str(repo)], home=tmp)
+            ref = f"refs/heads/{base}"
+            try:
+                self._git(["fetch", "--quiet", "--no-tags", "--", sb.repo_url or "", f"+{ref}:{ref}"],
+                          home=tmp, cwd=str(repo))
+            except WorkspaceError as e:
+                if "couldn't find remote ref" in str(e):
+                    raise WorkspaceError(f"{sb.repo_url} has no branch {base!r}") from e
+                raise
+            tip = host_git(["rev-parse", ref], home=tmp, cwd=str(repo)).strip()
+            if tip in have:
+                return None, tip
+            known = []
+            for sha in have:
+                try:
+                    host_git(["cat-file", "-e", f"{sha}^{{commit}}"], home=tmp, cwd=str(repo))
+                    known.append(f"^{sha}")
+                except WorkspaceError:
+                    pass
+            out = f"{tmp}/sync.bundle"
+            try:
+                host_git(["bundle", "create", "--quiet", out, ref, *known], home=tmp, cwd=str(repo))
+            except WorkspaceError as e:
+                if "empty bundle" not in str(e):
+                    raise
+                return None, tip  # the sandbox already has every commit (e.g. the remote went back)
+            if Path(out).stat().st_size > MAX_BUNDLE:
+                raise WorkspaceError("Update is larger than 1 GB")
+            return Path(out).read_bytes(), tip
+
+    def forget(self, sb: Sandbox) -> None:
+        """The sandbox is gone: drop its host cache."""
+        import shutil
+
+        shutil.rmtree(self.cache_dir / f"{sb.id}.git", ignore_errors=True)
 
     def finalize(self, sb: Sandbox, run: Run, log) -> Finalized:
         out = self._sh(sb, FINALIZE_SCRIPT, {"AH_BRANCH": run.branch or "", "AH_BASE": run.base_branch or "",
@@ -317,10 +436,12 @@ class GitWorkspace:
         out = self._sh(sb, STATS_SCRIPT, {"AH_BASE": run.base_branch or "", "AH_BRANCH": run.branch or ""})
         return parse_stats(out)
 
-    def push(self, sb: Sandbox, run: Run, log) -> bool:
+    def push(self, sb: Sandbox, run: Run, log, explicit: bool = False) -> bool:
+        """`explicit`: the owner asked for this push (e.g. to open a pull request), so the
+        sandbox's automatic-push setting doesn't apply."""
         s = config.settings
         branch = run.branch or ""
-        if not (sb.allow_push and sb.repo_url):
+        if not ((sb.allow_push or explicit) and sb.repo_url):
             return False
         if not s.github_token:
             log("Push is on, but no GitHub token is configured; skipped")
@@ -346,25 +467,6 @@ class GitWorkspace:
 
     def _git(self, args: list[str], home: str, cwd: str | None = None) -> str:
         return host_git(args, home, cwd, token=True)
-
-    def _host_branch_bundle(self, url: str, branch: str) -> bytes:
-        if not re.fullmatch(r"[A-Za-z0-9._][A-Za-z0-9._/-]{0,99}", branch) or ".." in branch:
-            raise WorkspaceError(f"Not a valid branch name: {branch!r}")
-        with tempfile.TemporaryDirectory(prefix="ah-fetch-") as tmp:
-            try:
-                self._git(["clone", "--quiet", "--bare", "--single-branch", "--branch", branch, "--", url,
-                           f"{tmp}/repo.git"], home=tmp)
-            except WorkspaceError as e:
-                if "not found in upstream" in str(e):
-                    raise WorkspaceError(f"Base branch {branch!r} doesn't exist in {url}. Push it there "
-                                         "first, or change the sandbox's base branch.") from e
-                raise
-            self._git(["bundle", "create", "--quiet", f"{tmp}/repo.bundle", f"refs/heads/{branch}"],
-                      home=tmp, cwd=f"{tmp}/repo.git")
-            path = Path(f"{tmp}/repo.bundle")
-            if path.stat().st_size > MAX_BUNDLE:
-                raise WorkspaceError("Repository is larger than 1 GB")
-            return path.read_bytes()
 
     def _host_clone_bundle(self, url: str) -> bytes:
         with tempfile.TemporaryDirectory(prefix="ah-clone-") as tmp:
@@ -394,6 +496,16 @@ class FakeWorkspace:
         log(f"On branch {run.branch} from {start_from or base}")
         return base
 
+    def sync(self, sb: Sandbox, base: str | None, log) -> str:
+        if not sb.repo_url:
+            raise WorkspaceError("This sandbox has no repository to sync with")
+        msg = f"{base or sb.base_branch or 'main'} is up to date with {sb.repo_url}"
+        log(msg)
+        return msg
+
+    def forget(self, sb: Sandbox) -> None:
+        pass
+
     def checkpoint(self, sb: Sandbox, run: Run, n: int) -> tuple[str, list[str]] | None:
         self.checkpoints = getattr(self, "checkpoints", 0)
         if not getattr(self, "changes", True):
@@ -412,8 +524,8 @@ class FakeWorkspace:
         log(f"Committed the agent's changes as {sha[:10]}")
         return Finalized(commit_sha=sha, commits=1, committed_now=True)
 
-    def push(self, sb: Sandbox, run: Run, log) -> bool:
-        if not (sb.allow_push and sb.repo_url):
+    def push(self, sb: Sandbox, run: Run, log, explicit: bool = False) -> bool:
+        if not ((sb.allow_push or explicit) and sb.repo_url):
             return False
         if not BRANCH_RE.fullmatch(run.branch or ""):
             raise WorkspaceError("bad branch")

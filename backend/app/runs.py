@@ -137,6 +137,9 @@ class RunManager:
         self._paused: dict[str, tuple[int, float]] = {}  # run id -> (open owner requests, since)
         self._budget_warned: set[str] = set()
         self.on_finished = None  # callable(run, sandbox_name), e.g. Notifier.run_finished
+        from .taskqueue import TaskQueue
+
+        self.queue = TaskQueue(self)
 
     # ---- queries -------------------------------------------------------------
 
@@ -250,6 +253,40 @@ class RunManager:
         self._tasks[run.id] = task
         task.add_done_callback(lambda _: self._tasks.pop(run.id, None))
         return task
+
+    def open_pr(self, run_id: str, ip: str, draft: bool = False) -> Run:
+        """Push the run's branch if it isn't yet (the owner asked, so the automatic-push setting
+        doesn't apply), then open a pull request into its base branch."""
+        from .github import GitHubError, open_pull_request, repo_slug
+
+        run = self.get(run_id)
+        if run.active:
+            raise InvalidTransition("Wait for the run to finish")
+        if run.pr_url:
+            return run
+        if not (run.branch and run.base_branch and run.commit_sha):
+            raise InvalidTransition("This run made no commits, so there's nothing to open a pull request for")
+        sb = self.sandboxes.get(run.sandbox_id)
+        if not sb.repo_url:
+            raise InvalidTransition("This sandbox has no repository")
+        try:
+            repo_slug(sb.repo_url)
+            if not run.pushed:
+                if sb.state != "running" or not sb.container_id:
+                    raise InvalidTransition("Start the sandbox first, so the branch can be pushed")
+                if not config.settings.github_token:
+                    raise GitHubError("No GitHub token is set on the server (python -m app.set_secret github)")
+                if not self.workspace.push(sb, run, lambda t: self._sys(run, t), explicit=True):
+                    raise GitHubError("The branch couldn't be pushed")
+                self.db.update_run(run, pushed=True)
+            url = open_pull_request(sb.repo_url, run, draft=draft)
+        except (GitHubError, WorkspaceError) as e:
+            self.db.audit(ip, "run.pr", run.sandbox_id, ok=False, detail={"run": run.id, "error": str(e)[:300]})
+            raise SandboxError(str(e)) from e
+        self.db.update_run(run, pr_url=url)
+        self._sys(run, f"Opened pull request {url}")
+        self.db.audit(ip, "run.pr", run.sandbox_id, detail={"run": run.id, "url": url})
+        return run
 
     def can_send(self, run_id: str) -> bool:
         proc = self._procs.get(run_id)
@@ -771,3 +808,7 @@ class RunManager:
         self._dropped.discard(run.id)
         self.verify_attempts.pop(run.id, None)
         self.verify_gave_up.discard(run.id)
+        try:
+            await self.queue.after_run(run)
+        except Exception:  # noqa: BLE001  (the run itself is done and recorded)
+            log.exception("starting the next queued task after run %s failed", run.id)

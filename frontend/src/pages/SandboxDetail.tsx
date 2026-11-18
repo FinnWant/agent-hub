@@ -221,7 +221,20 @@ function BaseBranchSetting({ sb, onChanged }: { sb: Sandbox; onChanged: () => vo
   const toast = useToast();
   const [value, setValue] = useState(sb.base_branch ?? "");
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [synced, setSynced] = useState<string | null>(null);
   useEffect(() => setValue(sb.base_branch ?? ""), [sb.base_branch]);
+  const sync = async () => {
+    setSyncing(true);
+    setSynced(null);
+    try {
+      setSynced((await api.syncSandbox(sb.id)).message);
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setSyncing(false);
+    }
+  };
   const v = value.trim();
   const invalid = !!v && !BRANCH_RE.test(v);
   const changed = v !== (sb.base_branch ?? "");
@@ -243,7 +256,8 @@ function BaseBranchSetting({ sb, onChanged }: { sb: Sandbox; onChanged: () => vo
         <label htmlFor="base-branch"><strong>Base branch</strong></label>
         <p>
           The branch each new run starts from, and that its diff is compared against.
-          {sb.repo_url ? " If it isn't in the sandbox yet, it's fetched from the repository at the next run."
+          {sb.repo_url ? " Before each run it's brought up to date with the repository (or fetched, if it was made"
+            + " there since); a copy with commits of its own in the sandbox is left alone."
             : " Leave it empty to use the workspace's current branch."}
         </p>
       </div>
@@ -254,8 +268,17 @@ function BaseBranchSetting({ sb, onChanged }: { sb: Sandbox; onChanged: () => vo
         <button className="btn" type="submit" disabled={saving || !changed || invalid}>
           {saving ? "Saving…" : "Save"}
         </button>
+        {sb.repo_url && (
+          <button className="btn btn-ghost" type="button" onClick={sync}
+            disabled={syncing || changed || sb.state !== "running"}
+            title={sb.state !== "running" ? "Start the sandbox first" : changed ? "Save the branch first"
+              : "Update it from the repository now"}>
+            <Icon name="refresh" size={14} /> {syncing ? "Syncing…" : "Sync now"}
+          </button>
+        )}
       </div>
       {invalid && <span className="error">Not a valid branch name</span>}
+      {synced && <p className="muted" style={{ margin: 0, fontSize: 12 }}>{synced}</p>}
     </form>
   );
 }

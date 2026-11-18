@@ -106,6 +106,19 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     PRIMARY KEY (run_id, n)
 );
 
+CREATE TABLE IF NOT EXISTS queued_tasks (
+    id          TEXT PRIMARY KEY,
+    sandbox_id  TEXT NOT NULL,
+    prompt      TEXT NOT NULL,
+    runner      TEXT NOT NULL,
+    timeout     INTEGER,                -- seconds; NULL: the default
+    max_turns   INTEGER,
+    continue_previous INTEGER NOT NULL DEFAULT 0,  -- continue the run before it, not a fresh one
+    position    REAL NOT NULL,
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS queued_tasks_sandbox ON queued_tasks(sandbox_id, position);
+
 CREATE TABLE IF NOT EXISTS run_events (
     run_id  TEXT NOT NULL,
     seq     INTEGER NOT NULL,
@@ -136,6 +149,9 @@ MIGRATIONS = [
     ("runs", "paused_seconds", "REAL NOT NULL DEFAULT 0"),  # waiting on the owner; not counted
     ("runs", "report", "TEXT"),                 # JSON: the handoff report (report.py)
     ("runs", "rewound_to", "INTEGER"),          # checkpoint the branch was put back to
+    ("runs", "pr_url", "TEXT"),                 # the pull request opened for the run's branch
+    ("sandboxes", "queue_paused", "INTEGER NOT NULL DEFAULT 0"),  # don't start queued tasks
+    ("sandboxes", "queue_note", "TEXT"),        # why the queue paused itself
 ]
 
 RUN_STATES = ("queued", "running", "succeeded", "failed", "cancelled", "timed_out")
@@ -163,9 +179,12 @@ class Sandbox:
     verify_cmd: str | None = None        # the project's checks, e.g. "npm test" (see verify.py)
     budget_usd: float | None = None      # per run, estimated at API prices (usage.py)
     approval_rules: str | None = None    # actions that need the owner's OK (owner.py)
+    queue_paused: bool = False           # queued tasks wait (taskqueue.py)
+    queue_note: str | None = None
 
     def __post_init__(self) -> None:
         self.allow_push = bool(self.allow_push)
+        self.queue_paused = bool(self.queue_paused)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -204,6 +223,7 @@ class Run:
     paused_seconds: float = 0.0
     report: str | None = None
     rewound_to: int | None = None
+    pr_url: str | None = None
 
     def __post_init__(self) -> None:
         self.pushed = bool(self.pushed)
@@ -368,6 +388,38 @@ class Database:
                 "SELECT seq, ts, data FROM run_events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (run_id, after_seq, limit)).fetchall()
         return [{"seq": r["seq"], "ts": r["ts"], **json.loads(r["data"])} for r in rows]
+
+    # ---- queued tasks --------------------------------------------------------
+
+    def queued_tasks(self, sandbox_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM queued_tasks WHERE sandbox_id = ? ORDER BY position, created_at",
+                                      (sandbox_id,)).fetchall()
+        return [{**dict(r), "continue_previous": bool(r["continue_previous"])} for r in rows]
+
+    def insert_queued_task(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            last = self._conn.execute("SELECT MAX(position) FROM queued_tasks WHERE sandbox_id = ?",
+                                      (row["sandbox_id"],)).fetchone()[0]
+            row = {**row, "position": (last or 0) + 1, "created_at": time.time()}
+            self._conn.execute(f"INSERT INTO queued_tasks ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                               tuple(row.values()))
+
+    def delete_queued_task(self, task_id: str, sandbox_id: str | None = None) -> bool:
+        q, args = "DELETE FROM queued_tasks WHERE id = ?", [task_id]
+        if sandbox_id:
+            q += " AND sandbox_id = ?"
+            args.append(sandbox_id)
+        with self._lock:
+            return self._conn.execute(q, args).rowcount > 0
+
+    def set_queued_position(self, task_id: str, position: float) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE queued_tasks SET position = ? WHERE id = ?", (position, task_id))
+
+    def clear_queue(self, sandbox_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM queued_tasks WHERE sandbox_id = ?", (sandbox_id,))
 
     # ---- push subscriptions --------------------------------------------------
 

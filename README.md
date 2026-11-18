@@ -102,7 +102,8 @@ sudo systemctl restart agent-hub
   **Workflows** off, so agent branches can't change GitHub Actions workflows (and keep
   `on: push` workflows in those repositories limited to protected branches). Turn on branch
   protection for `main` in those repositories as a second line of defence. Pushing is off per
-  sandbox until you enable it in the sandbox's Settings tab.
+  sandbox until you enable it in the sandbox's Settings tab. For the **Open PR** button, also
+  give it **Pull requests: read and write**.
 
 ## Web UI
 
@@ -292,6 +293,23 @@ queued → running → succeeded | failed | cancelled | timed_out
 Every log line is redacted for known secrets (and common token shapes) before it is stored or
 streamed.
 
+### Keeping up with GitHub, pull requests and the queue
+
+- **Sync:** before each run, the sandbox's base branch is brought up to date with the remote.
+  The host fetches into its own cache (`data/upstream/<sandbox>.git`, holding only what came
+  from the remote) and only the new commits go into the sandbox, as a bundle; the sandbox
+  never talks to the remote and the token never enters it. A branch made on the remote since
+  the clone is fetched; a base branch with commits of its own in the sandbox is left alone and
+  the run log says so. Settings → Base branch → **Sync now** does it on demand.
+- **Open PR:** on a finished run with commits, pushes `agent/<run-id>` if it isn't yet (your
+  click counts as consent, whatever the automatic-push setting) and opens a pull request into
+  the run's base branch, described from its handoff report. One that's already open for the
+  branch is reused.
+- **Queue:** while a run is going, the composer adds tasks to the sandbox's queue; each starts
+  when the run before it ends, fresh from the base branch or continuing that run. The queue
+  pauses itself when a run doesn't succeed or its checks fail, with the reason, and waits for
+  **Resume**.
+
 ## Previews
 
 Each sandbox gets a host port from `PREVIEW_PORT_RANGE` (8200–8299) when it is created, mapped
@@ -401,5 +419,4 @@ sudo bash deploy/security-audit.sh   # read-only snapshot: firewall, open ports,
 6. Hardening — Claude gateway, per-sandbox networks, host-side diff, disk guard, root-owned
    install, session revocation, host check *(current)*
 
-**Later:** gVisor, egress domain allowlist, opening pull requests, multiple runners, run
-templates, scheduled runs.
+**Later:** gVisor, egress domain allowlist, multiple runners, run templates, scheduled runs.

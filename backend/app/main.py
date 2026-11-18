@@ -71,6 +71,10 @@ async def lifespan(app: FastAPI):
         log.info("re-attaching to run %s", run.id)
         app.state.runs.resume(run, state)
     try:
+        await app.state.runs.queue.kick_all()
+    except Exception:  # noqa: BLE001
+        log.exception("starting queued tasks at startup failed")
+    try:
         svc.backend.ensure_network()
     except Exception as e:  # keep serving so /api/health can report the problem
         log.error("Docker unavailable at startup: %s", e)
@@ -354,8 +358,29 @@ def update_sandbox(sandbox_id: str, body: SandboxSettings, _: Admin, request: Re
 
 
 @app.post("/api/sandboxes/{sandbox_id}/start")
-def start_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc) -> dict:
-    return sandbox_out(svc.start(sandbox_id, auth.client_ip(request)))
+async def start_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc, runs: Runs) -> dict:
+    sb = await asyncio.to_thread(svc.start, sandbox_id, auth.client_ip(request))
+    await runs.queue.kick(sandbox_id)  # tasks queued while it was stopped
+    return sandbox_out(sb)
+
+
+@app.post("/api/sandboxes/{sandbox_id}/sync")
+async def sync_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc, runs: Runs) -> dict:
+    """Bring the sandbox's base branch up to date with the remote now (runs do it on their own)."""
+    from .workspace import WorkspaceError
+
+    sb = svc.get(sandbox_id)
+    if sb.state != "running" or not sb.container_id:
+        raise InvalidTransition("Start the sandbox first")
+    if runs.active_for(sandbox_id):
+        raise InvalidTransition("Wait for the run to finish")
+    try:
+        msg = await asyncio.to_thread(runs.workspace.sync, sb, None, lambda _: None)
+    except WorkspaceError as e:
+        svc.db.audit(auth.client_ip(request), "sandbox.sync", sandbox_id, ok=False, detail={"error": str(e)[:300]})
+        raise SandboxError(str(e)) from e
+    svc.db.audit(auth.client_ip(request), "sandbox.sync", sandbox_id, detail={"result": msg[:300]})
+    return {"message": msg}
 
 
 @app.post("/api/sandboxes/{sandbox_id}/stop")
@@ -369,7 +394,11 @@ async def stop_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc, ru
 async def destroy_sandbox(sandbox_id: str, _: Admin, request: Request, svc: Svc, runs: Runs) -> Response:
     ip = auth.client_ip(request)
     await runs.cancel_for_sandbox(sandbox_id, ip)
+    sb = svc.get(sandbox_id)
     await asyncio.to_thread(svc.destroy, sandbox_id, ip)
+    svc.db.clear_queue(sandbox_id)
+    if forget := getattr(runs.workspace, "forget", None):
+        await asyncio.to_thread(forget, sb)
     return Response(status_code=204)
 
 
@@ -581,6 +610,64 @@ async def start_run(sandbox_id: str, body: StartRun, _: Admin, request: Request,
         timeout=body.timeout_minutes * 60 if body.timeout_minutes else None, max_turns=body.max_turns,
         ip=auth.client_ip(request), continue_from=body.continue_from)
     runs.launch(run)
+    return run_out(run)
+
+
+class QueueTask(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20_000)
+    runner: str = Field(default="claude-code", max_length=40)
+    timeout_minutes: int | None = Field(default=None, ge=1, le=24 * 60)
+    max_turns: int | None = Field(default=None, ge=1, le=10_000)
+    continue_previous: bool = False
+
+
+class QueueState(BaseModel):
+    paused: bool
+
+
+class QueueMove(BaseModel):
+    offset: int = Field(ge=-100, le=100)
+
+
+@app.get("/api/sandboxes/{sandbox_id}/queue")
+def get_queue(sandbox_id: str, _: Admin, runs: Runs) -> dict:
+    return runs.queue.view(sandbox_id)
+
+
+@app.post("/api/sandboxes/{sandbox_id}/queue", status_code=201)
+async def add_to_queue(sandbox_id: str, body: QueueTask, _: Admin, request: Request, runs: Runs) -> dict:
+    """Queue a task; it starts right away if the sandbox is free and the queue isn't paused."""
+    runs.queue.add(sandbox_id, prompt=body.prompt.strip(), runner=body.runner,
+                   timeout=body.timeout_minutes * 60 if body.timeout_minutes else None, max_turns=body.max_turns,
+                   continue_previous=body.continue_previous, ip=auth.client_ip(request))
+    started = await runs.queue.kick(sandbox_id)
+    return {**runs.queue.view(sandbox_id), "started": run_out(started) if started else None}
+
+
+@app.patch("/api/sandboxes/{sandbox_id}/queue")
+async def set_queue(sandbox_id: str, body: QueueState, _: Admin, request: Request, runs: Runs) -> dict:
+    runs.queue.set_paused(sandbox_id, body.paused, auth.client_ip(request))
+    started = None if body.paused else await runs.queue.kick(sandbox_id)
+    return {**runs.queue.view(sandbox_id), "started": run_out(started) if started else None}
+
+
+@app.delete("/api/sandboxes/{sandbox_id}/queue/{task_id}")
+def remove_from_queue(sandbox_id: str, task_id: str, _: Admin, request: Request, runs: Runs) -> dict:
+    return runs.queue.remove(sandbox_id, task_id, auth.client_ip(request))
+
+
+@app.post("/api/sandboxes/{sandbox_id}/queue/{task_id}/move")
+def move_in_queue(sandbox_id: str, task_id: str, body: QueueMove, _: Admin, runs: Runs) -> dict:
+    return runs.queue.move(sandbox_id, task_id, body.offset)
+
+
+class OpenPR(BaseModel):
+    draft: bool = False
+
+
+@app.post("/api/runs/{run_id}/pr")
+async def open_pr(run_id: str, body: OpenPR, _: Admin, request: Request, runs: Runs) -> dict:
+    run = await asyncio.to_thread(runs.open_pr, run_id, auth.client_ip(request), body.draft)
     return run_out(run)
 
 

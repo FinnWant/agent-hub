@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { api, ApiError, runEventsUrl, type Run, type RunEvent, type RunState, type Sandbox, type SystemInfo } from "../lib/api";
+import { api, ApiError, runEventsUrl, type TaskQueue, type Run, type RunEvent, type RunState, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago } from "../lib/format";
 import { navigate, useQuery, withQuery } from "../lib/router";
 import { Icon, Kbd, useToast } from "./ui";
@@ -44,16 +44,22 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
   const picked = useQuery().get("run");
   const setSelected = (rid: string) => rid !== picked && navigate(withQuery({ run: rid }));
   const [continuing, setContinuing] = useState<Run | null>(null);
+  const [queue, setQueue] = useState<TaskQueue | null>(null);
   const toast = useToast();
 
   const reload = useCallback(async () => {
     try {
-      const list = await api.runs(sb.id);
+      const [list, q] = await Promise.all([api.runs(sb.id), api.queue(sb.id)]);
       setRuns(list);
+      setQueue(q);
     } catch (e) {
       toast("error", (e as Error).message);
     }
   }, [sb.id, toast]);
+  const onQueue = (q: TaskQueue) => {
+    setQueue(q);
+    if (q.started) started(q.started);
+  };
 
   useEffect(() => {
     reload();
@@ -82,6 +88,7 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
     }
   };
   const selected = picked ?? runs?.[0]?.id ?? null;
+  const pushable = !!sb.repo_url && /^https:\/\/github\.com\//.test(sb.repo_url) && !!system?.agent.github_token;
   const current = runs?.find((r) => r.id === selected) ?? null;
 
   return (
@@ -89,7 +96,10 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
       <aside className="runs-side">
         <Composer sb={sb} system={system} busyRun={active ?? null} continuing={continuing}
           onClearContinue={() => setContinuing(null)}
-          onStarted={started} />
+          onStarted={started} onQueued={onQueue} />
+        {queue && (queue.items.length > 0 || queue.paused) && (
+          <QueueList sb={sb} queue={queue} onChange={onQueue} />
+        )}
         <div className="runs-side-tools">
           <LedgerButton sandboxId={sb.id} disabled={sb.state !== "running"} />
         </div>
@@ -117,7 +127,8 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
           <RunView key={current.id} initial={current}
             onChange={(run) => setRuns((rs) => rs?.map((r) => (r.id === run.id ? run : r)) ?? rs)}
             onContinue={active ? undefined : setContinuing}
-            onRerun={active || sb.state !== "running" ? undefined : rerun} />
+            onRerun={active || sb.state !== "running" ? undefined : rerun}
+            canPr={pushable} />
         ) : (
           <div className="card empty" style={{ height: "100%", justifyContent: "center" }}>
             <h2>Give the agent a task</h2>
@@ -134,13 +145,14 @@ export default function Runs({ sb, system }: { sb: Sandbox; system: SystemInfo |
 
 /* ---------------------------------------------------------------- Composer */
 
-function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted }: {
+function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted, onQueued }: {
   sb: Sandbox;
   system: SystemInfo | null;
   busyRun: Run | null;
   continuing: Run | null;
   onClearContinue: () => void;
   onStarted: (run: Run) => void;
+  onQueued: (q: TaskQueue) => void;
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -150,24 +162,35 @@ function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted 
   const [minutes, setMinutes] = useState<number | "">("");
   const [turns, setTurns] = useState<number | "">("");
   const [advanced, setAdvanced] = useState(false);
+  const [carryOn, setCarryOn] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const agent = system?.agent;
 
   const blocked = sb.state !== "running" ? "Start the sandbox to run the agent."
     : agent && !agent.claude_token ? "No Claude token is set on the server (python -m app.set_secret claude)."
-    : busyRun ? "A run is in progress in this sandbox."
     : null;
+  // While a run is going, new tasks join the queue and start when it ends.
+  const queueing = !!busyRun;
 
   const submit = async () => {
     if (!prompt.trim() || blocked || busy) return;
     setBusy(true);
     setError(null);
+    const limits = {
+      ...(minutes ? { timeout_minutes: Number(minutes) } : {}),
+      ...(turns ? { max_turns: Number(turns) } : {}),
+    };
     try {
+      if (queueing) {
+        onQueued(await api.enqueue(sb.id, { prompt: prompt.trim(), ...limits, continue_previous: carryOn }));
+        setPrompt("");
+        setCarryOn(false);
+        return;
+      }
       const run = await api.startRun(sb.id, {
         prompt: prompt.trim(),
-        ...(minutes ? { timeout_minutes: Number(minutes) } : {}),
-        ...(turns ? { max_turns: Number(turns) } : {}),
+        ...limits,
         ...(continuing ? { continue_from: continuing.id } : {}),
       });
       setPrompt("");
@@ -205,9 +228,16 @@ function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted 
       )}
       <label htmlFor="prompt" className="visually-hidden">Task for the agent</label>
       <textarea id="prompt" ref={inputRef} className="input composer-input" rows={4} maxLength={20000}
-        placeholder={continuing ? "What should the agent do next?"
+        placeholder={queueing ? "Queue a task; it starts when the current run ends"
+          : continuing ? "What should the agent do next?"
           : sb.repo_url ? "e.g. Add a README section describing this project" : "Describe what the agent should build or change"}
-        value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKey} disabled={!!blocked && !busyRun} />
+        value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={onKey} disabled={!!blocked} />
+      {queueing && (
+        <label className="composer-check">
+          <input type="checkbox" checked={carryOn} onChange={(e) => setCarryOn(e.target.checked)} />
+          Continue the run before it (same branch and session) instead of starting fresh
+        </label>
+      )}
       {advanced && (
         <div className="composer-advanced">
           <label>
@@ -230,9 +260,64 @@ function Composer({ sb, system, busyRun, continuing, onClearContinue, onStarted 
           {minutes || defMin} min · {turns || defTurns} turns
         </button>
         <button className="btn btn-primary" onClick={submit} disabled={!prompt.trim() || !!blocked || busy}>
-          {busy ? "Starting…" : "Run agent"} <Kbd>{SUBMIT_KEY}</Kbd>
+          {busy ? (queueing ? "Adding…" : "Starting…") : queueing ? "Add to queue" : "Run agent"} <Kbd>{SUBMIT_KEY}</Kbd>
         </button>
       </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- Queue */
+
+function QueueList({ sb, queue, onChange }: { sb: Sandbox; queue: TaskQueue; onChange: (q: TaskQueue) => void }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const act = async (fn: () => Promise<TaskQueue>) => {
+    setBusy(true);
+    try {
+      onChange(await fn());
+    } catch (e) {
+      const err = e as ApiError;
+      toast("error", err.reasons?.length ? err.reasons.join(" ") : err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const n = queue.items.length;
+  return (
+    <div className="card run-queue">
+      <div className="run-queue-head">
+        <strong>Queue</strong>
+        <span className="muted">{n} task{n === 1 ? "" : "s"}{queue.paused ? " · paused" : ""}</span>
+        <span className="spacer" />
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy}
+          onClick={() => act(() => api.setQueuePaused(sb.id, !queue.paused))}>
+          {queue.paused ? <><Icon name="play" size={14} /> Resume</> : "Pause"}
+        </button>
+      </div>
+      {queue.paused && queue.note && <p className="run-queue-note">{queue.note}</p>}
+      <ol className="run-queue-items">
+        {queue.items.map((t, i) => (
+          <li key={t.id}>
+            <span className="run-queue-prompt" title={t.prompt}>
+              {t.prompt.split("\n")[0]}
+              {t.continue_previous && <span className="muted"> · continues the run before</span>}
+            </span>
+            <button type="button" className="btn btn-ghost btn-sm btn-icon" disabled={busy || i === 0}
+              aria-label="Move up" title="Move up" onClick={() => act(() => api.moveQueued(sb.id, t.id, -1))}>
+              <Icon name="arrowUp" size={14} />
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm btn-icon" disabled={busy || i === n - 1}
+              aria-label="Move down" title="Move down" onClick={() => act(() => api.moveQueued(sb.id, t.id, 1))}>
+              <Icon name="arrowDown" size={14} />
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm btn-icon" disabled={busy}
+              aria-label="Remove from the queue" title="Remove" onClick={() => act(() => api.dequeue(sb.id, t.id))}>
+              <Icon name="clear" size={14} />
+            </button>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
@@ -286,16 +371,31 @@ function useRunEvents(runId: string, onDone: () => void) {
   return { events, conn };
 }
 
-function RunView({ initial, onChange, onContinue, onRerun }: {
+function RunView({ initial, onChange, onContinue, onRerun, canPr }: {
   initial: Run;
   onChange: (run: Run) => void;
   onContinue?: (run: Run) => void;
   onRerun?: (run: Run) => Promise<void>;
+  canPr: boolean;
 }) {
   const [run, setRun] = useState(initial);
   const [now, setNow] = useState(Date.now() / 1000);
   const [cancelling, setCancelling] = useState(false);
   const [rerunning, setRerunning] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const openPr = async () => {
+    setOpening(true);
+    try {
+      const r = await api.openPr(run.id);
+      setRun(r);
+      onChange(r);
+      toast("success", "Pull request opened");
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setOpening(false);
+    }
+  };
   const toast = useToast();
   const active = ACTIVE.includes(run.state);
 
@@ -421,6 +521,18 @@ function RunView({ initial, onChange, onContinue, onRerun }: {
             <button className="btn btn-sm" onClick={() => onContinue(run)}
               title="Start a new run on top of this one's branch, in the same agent session">
               Continue
+            </button>
+          )}
+          {!active && run.pr_url && (
+            <a className="btn btn-sm" href={run.pr_url} target="_blank" rel="noreferrer">
+              Pull request <Icon name="external" size={14} />
+            </a>
+          )}
+          {!active && !run.pr_url && canPr && run.commit_sha && (
+            <button className="btn btn-sm" onClick={openPr} disabled={opening}
+              title={run.verify === "failed" ? "Its checks fail; the pull request says so"
+                : `Push ${run.branch} if needed and open a pull request into ${run.base_branch}`}>
+              {opening ? "Opening…" : "Open PR"}
             </button>
           )}
           {!active && onRerun && (

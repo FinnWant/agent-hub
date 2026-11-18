@@ -73,7 +73,7 @@ def env(tmp_path, settings, monkeypatch):
     monkeypatch.setattr(config, "settings", dataclasses.replace(settings, github_token=GH_TOKEN))
     backend = LocalBackend(tmp_path / "box")
     (tmp_path / "box").mkdir(exist_ok=True)
-    w = GitWorkspace(backend, in_bundle=str(tmp_path / "box" / "in.bundle"))
+    w = GitWorkspace(backend, in_bundle=str(tmp_path / "box" / "in.bundle"), cache_dir=tmp_path / "cache")
     return w, backend
 
 
@@ -245,24 +245,75 @@ def test_kiln_folder_never_counts_as_a_change(env, origin):
     assert (b.ws / ".kiln" / "LEDGER.md").exists()
 
 
+def push_upstream(origin, tmp_path, branch, name, start=None):
+    """Commit `name` on `branch` of the remote, as the owner would from elsewhere."""
+    work = tmp_path / f"work-{name}"
+    git("clone", "-q", str(origin), str(work), cwd=tmp_path)
+    if start is not None or branch != "trunk":
+        git("checkout", "-q", "-B", branch, f"origin/{start or branch}" if start else "HEAD", cwd=work)
+    (work / name).write_text(name)
+    git("add", "-A", cwd=work)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", name, cwd=work)
+    git("push", "-q", "origin", branch, cwd=work)
+
+
 def test_base_branch_made_upstream_after_the_clone_is_fetched(env, origin, tmp_path):
     w, b = env
     sb = sandbox(url=f"file://{origin}")
     r1 = run("aaaaaaaaaaaa")
     r1.base_branch = w.prepare(sb, r1, lambda _: None)  # clones trunk
-    # The owner makes a new branch on the remote afterwards.
-    work = tmp_path / "work"
-    git("clone", "-q", str(origin), str(work), cwd=tmp_path)
-    git("checkout", "-q", "-b", "feature/new", cwd=work)
-    (work / "feature.txt").write_text("f")
-    git("add", "-A", cwd=work)
-    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "feature", cwd=work)
-    git("push", "-q", "origin", "feature/new", cwd=work)
+    push_upstream(origin, tmp_path, "feature/new", "feature.txt", start="trunk")
 
     sb2, r2, logs = dataclasses.replace(sb, base_branch="feature/new"), run("bbbbbbbbbbbb"), []
     assert w.prepare(sb2, r2, logs.append) == "feature/new"
     assert (b.ws / "feature.txt").exists()
-    assert any("fetching it" in line for line in logs)
+    assert any("Fetched feature/new" in line for line in logs)
 
-    with pytest.raises(WorkspaceError, match="doesn't exist in"):
-        w.prepare(dataclasses.replace(sb, base_branch="nope"), run("cccccccccccc"), lambda _: None)
+    logs = []
+    with pytest.raises(WorkspaceError, match="doesn't exist in the sandbox or in"):
+        w.prepare(dataclasses.replace(sb, base_branch="nope"), run("cccccccccccc"), logs.append)
+    assert any("has no branch 'nope'" in line for line in logs)
+
+
+def test_new_commits_on_the_remote_base_reach_the_next_run(env, origin, tmp_path):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    w.finalize(sb, r1, lambda _: None)
+    push_upstream(origin, tmp_path, "trunk", "one.txt")
+    push_upstream(origin, tmp_path, "trunk", "two.txt")
+
+    r2, logs = run("bbbbbbbbbbbb"), []
+    w.prepare(sb, r2, logs.append)
+    assert (b.ws / "one.txt").exists() and (b.ws / "two.txt").exists()
+    assert any("2 new commits" in line for line in logs)
+    assert git("rev-parse", "trunk", cwd=b.ws) == git("rev-parse", "trunk", cwd=origin)
+    # Nothing new: no download, and it says so.
+    assert "up to date" in w.sync(sb, None, lambda _: None)
+
+
+def test_a_base_branch_changed_in_the_sandbox_is_kept(env, origin, tmp_path):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    git("checkout", "-q", "trunk", cwd=b.ws)
+    (b.ws / "local.txt").write_text("l")
+    git("add", "-A", cwd=b.ws)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "local", cwd=b.ws)
+    assert "doesn't" in w.sync(sb, None, lambda _: None)  # ahead: "commits the remote doesn't"
+    push_upstream(origin, tmp_path, "trunk", "remote.txt")
+    assert "both changed" in w.sync(sb, None, lambda _: None)
+    assert (b.ws / "local.txt").exists() and not (b.ws / "remote.txt").exists()
+
+
+def test_remote_unreachable_still_runs_from_the_sandbox_copy(env, origin, tmp_path):
+    w, b = env
+    sb = sandbox(url=f"file://{origin}")
+    r1 = run("aaaaaaaaaaaa")
+    r1.base_branch = sb.base_branch = w.prepare(sb, r1, lambda _: None)
+    gone = dataclasses.replace(sb, repo_url=f"file://{tmp_path}/missing.git")
+    logs = []
+    assert w.prepare(gone, run("bbbbbbbbbbbb"), logs.append) == "trunk"
+    assert any("Couldn't update trunk" in line for line in logs)

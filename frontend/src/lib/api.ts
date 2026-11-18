@@ -26,6 +26,9 @@ export interface Sandbox {
   budget_usd: number | null;
   /** Tool calls that need the owner's OK, one rule per line (see owner.py). */
   approval_rules: string | null;
+  /** Queued tasks wait while this is on; the queue turns it on itself when a run goes wrong. */
+  queue_paused: boolean;
+  queue_note: string | null;
   memory_usage: number | null;
   last_run?: { id: string; state: RunState; created_at: number; finished_at: number | null } | null;
 }
@@ -71,6 +74,29 @@ export interface Run {
   rewound_to: number | null;
   /** The agent is running and reads messages (see `api.sendRunMessage`). */
   can_message: boolean;
+  /** The pull request opened for the run's branch. */
+  pr_url: string | null;
+}
+
+export interface QueuedTask {
+  id: string;
+  sandbox_id: string;
+  prompt: string;
+  runner: string;
+  timeout: number | null;
+  max_turns: number | null;
+  /** Continue the run before it instead of starting fresh from the base branch. */
+  continue_previous: boolean;
+  position: number;
+  created_at: number;
+}
+
+export interface TaskQueue {
+  paused: boolean;
+  note: string | null;
+  items: QueuedTask[];
+  /** The run a queue change started right away, if any. */
+  started?: Run | null;
 }
 
 /** Something a run needs the owner to decide (approval, question, budget). */
@@ -342,6 +368,18 @@ export const api = {
     max_turns?: number; continue_from?: string }) =>
     request<Run>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/runs`, body),
   run: (id: string) => request<Run>("GET", `/runs/${encodeURIComponent(id)}`),
+  openPr: (id: string, draft = false) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/pr`, { draft }),
+  syncSandbox: (id: string) => request<{ message: string }>("POST", `/sandboxes/${encodeURIComponent(id)}/sync`),
+  queue: (sandboxId: string) => request<TaskQueue>("GET", `/sandboxes/${encodeURIComponent(sandboxId)}/queue`),
+  enqueue: (sandboxId: string, body: { prompt: string; runner?: string; timeout_minutes?: number; max_turns?: number;
+    continue_previous?: boolean }) =>
+    request<TaskQueue>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/queue`, body),
+  setQueuePaused: (sandboxId: string, paused: boolean) =>
+    request<TaskQueue>("PATCH", `/sandboxes/${encodeURIComponent(sandboxId)}/queue`, { paused }),
+  dequeue: (sandboxId: string, taskId: string) =>
+    request<TaskQueue>("DELETE", `/sandboxes/${encodeURIComponent(sandboxId)}/queue/${encodeURIComponent(taskId)}`),
+  moveQueued: (sandboxId: string, taskId: string, offset: number) =>
+    request<TaskQueue>("POST", `/sandboxes/${encodeURIComponent(sandboxId)}/queue/${encodeURIComponent(taskId)}/move`, { offset }),
   cancelRun: (id: string) => request<Run>("POST", `/runs/${encodeURIComponent(id)}/cancel`),
   requests: (params: { state?: OwnerRequest["state"]; run?: string; limit?: number } = {}) =>
     request<OwnerRequest[]>("GET", `/requests?${new URLSearchParams(
