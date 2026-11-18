@@ -3,7 +3,7 @@ import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { terminalUrl } from "../lib/api";
-import { Icon } from "./ui";
+import { Icon, useToast } from "./ui";
 
 // Kiln terminal palette: slate ground, ember cursor, status hues for ANSI colours.
 const THEME: ITheme = {
@@ -38,6 +38,27 @@ type Status =
   | { kind: "open" }
   | { kind: "closed"; message: string; canRetry: boolean };
 
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+
+/**
+ * Copy and paste keys. xterm.js would otherwise send Ctrl+V to the shell as a control character
+ * (and cancel the browser's paste) and Ctrl+C always as an interrupt. Returning false hands the
+ * key back to the browser, whose own copy/paste events xterm handles (selection out, bracketed
+ * paste in); unlike the Clipboard API, that also works on a plain http:// address.
+ *   copy:  Ctrl+Shift+C, Ctrl+C with a selection (without one it's still an interrupt), Cmd+C
+ *   paste: Ctrl+V, Ctrl+Shift+V, Shift+Insert, Cmd+V
+ */
+export function clipboardKey(e: KeyboardEvent, hasSelection: boolean): "copy" | "paste" | null {
+  if (e.type !== "keydown" || e.altKey) return null;
+  const key = e.key.toLowerCase();
+  const mod = IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+  if (key === "insert" && e.shiftKey && !e.ctrlKey && !e.metaKey) return "paste";
+  if (!mod) return null;
+  if (key === "c" && (e.shiftKey || hasSelection)) return hasSelection ? "copy" : null;
+  if (key === "v") return "paste";
+  return null;
+}
+
 function closeMessage(code: number, reason: string): { message: string; canRetry: boolean } {
   switch (code) {
     case 1000:
@@ -64,6 +85,7 @@ export default function Terminal({ sandboxId, running }: { sandboxId: string; ru
   const wsRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "connecting" });
   const [size, setSize] = useState<[number, number]>([0, 0]);
+  const toast = useToast();
 
   const connect = useCallback(() => {
     const term = termRef.current;
@@ -108,6 +130,21 @@ export default function Terminal({ sandboxId, running }: { sandboxId: string; ru
     term.open(hostRef.current!);
     termRef.current = term;
     fitRef.current = fit;
+
+    term.attachCustomKeyEventHandler((e) => {
+      const what = clipboardKey(e, term.hasSelection());
+      const ctrlShiftC = e.type === "keydown" && e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "c";
+      if (ctrlShiftC) e.preventDefault(); // not the browser's inspector
+      if (what === "copy") {
+        // Ctrl+C / Cmd+C: the browser's copy event follows by itself. Ctrl+Shift+C has none, so
+        // fire one. Either way xterm puts the selection on the clipboard.
+        if (ctrlShiftC) document.execCommand("copy");
+        setTimeout(() => term.clearSelection(), 0);
+        return false;
+      }
+      if (what === "paste") return false; // the browser's paste event fires; xterm sends the text
+      return !ctrlShiftC;
+    });
 
     const enc = new TextEncoder();
     const send = (data: Uint8Array<ArrayBuffer>) => {
@@ -176,6 +213,39 @@ export default function Terminal({ sandboxId, running }: { sandboxId: string; ru
         <span className="mono">agent@/workspace</span>
         <span className="spacer" />
         <span className="mono" aria-label="Terminal size">{size[0]}×{size[1]}</span>
+        <button className="btn btn-ghost btn-sm" title={`Copy the selection (${IS_MAC ? "⌘C" : "Ctrl+Shift+C"})`}
+          onMouseDown={(e) => e.preventDefault() /* keep the selection */}
+          onClick={async () => {
+            const term = termRef.current;
+            const text = term?.getSelection() ?? "";
+            if (!text) {
+              toast("info", "Select some text in the terminal first");
+              return;
+            }
+            try {
+              await navigator.clipboard.writeText(text);
+              term?.clearSelection();
+            } catch {
+              toast("error", `The browser blocked copying here; use ${IS_MAC ? "⌘C" : "Ctrl+Shift+C"}`);
+            }
+            term?.focus();
+          }}>
+          Copy
+        </button>
+        <button className="btn btn-ghost btn-sm" title={`Paste (${IS_MAC ? "⌘V" : "Ctrl+V"})`}
+          disabled={status.kind !== "open"}
+          onClick={async () => {
+            const term = termRef.current;
+            try {
+              const text = await navigator.clipboard.readText();
+              if (text) term?.paste(text);
+            } catch {
+              toast("error", `The browser blocked reading the clipboard here; use ${IS_MAC ? "⌘V" : "Ctrl+V"}`);
+            }
+            term?.focus();
+          }}>
+          Paste
+        </button>
         <button className="btn btn-ghost btn-sm btn-icon" title="Clear screen" aria-label="Clear screen"
           onClick={() => {
             termRef.current?.clear();
