@@ -970,6 +970,9 @@ a.row:hover {
 
 .tabs {
   display: flex;
+  /* A scroll container in the page's flex column may otherwise shrink to nothing when a tab's
+     content (Settings) is taller than the screen. */
+  flex: none;
   gap: var(--space-1);
   margin: var(--space-5) 0 var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
@@ -1538,6 +1541,9 @@ a.row:hover {
   flex: 1;
   min-height: 420px;
   overflow: hidden;
+  /* Flat, without the card sheen: the sticky top row (status, cost, buttons) needs an opaque
+     background, and against the sheen it showed as a darker band. */
+  background: var(--bg-surface);
 }
 
 /* The header (prompt, report, timeline) gets at most --head-max; the log below gets the rest.
