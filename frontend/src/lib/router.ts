@@ -12,30 +12,58 @@ function subscribe(fn: () => void) {
   };
 }
 
-/** Each in-app history entry remembers the page it was opened from, so pages can offer "Back to …". */
-type EntryState = { prev?: string };
+/**
+ * Each in-app history entry remembers the pillar page (one in the main navigation: Sandboxes,
+ * Needs you, the audit log) it was reached from, and how deep in the history that pillar's entry
+ * is. "Back" then returns to the pillar in one step, however many tabs, runs and files were
+ * opened since, instead of retracing each of them.
+ */
+type EntryState = { prev?: string; pillar?: string; pillarDepth?: number; depth?: number };
 
 const here = () => location.pathname + location.search;
+const entry = (): EntryState => (history.state as EntryState | null) ?? {};
+
+export function isPillar(path: string): boolean {
+  const name = match(new URL(path, location.href).pathname).name;
+  return name === "home" || name === "audit" || name === "needsYou";
+}
 
 /** Go to `path` (may include a query). Scrolls to the top only when the page itself changes. */
 export function navigate(path: string, replace = false) {
   if (path === here()) return;
-  const samePage = new URL(path, location.href).pathname === location.pathname;
-  const state: EntryState = replace ? { prev: previousPath() ?? undefined } : { prev: here() };
+  const target = new URL(path, location.href).pathname;
+  const samePage = target === location.pathname;
+  const cur = entry();
+  let state: EntryState;
+  if (replace) {
+    state = { ...cur };
+  } else {
+    const depth = cur.depth ?? 0;
+    // Leaving a pillar: it becomes the way back. Anywhere else: keep the way back we came with.
+    const leaving = isPillar(here()) && !samePage;
+    let pillar = leaving ? here() : cur.pillar;
+    let pillarDepth = leaving ? depth : cur.pillarDepth;
+    if (pillar && new URL(pillar, location.href).pathname === target) {
+      pillar = undefined; // arrived at that pillar again: nothing behind it to go back to
+      pillarDepth = undefined;
+    }
+    state = { prev: here(), pillar, pillarDepth, depth: depth + 1 };
+  }
   history[replace ? "replaceState" : "pushState"](state, "", path);
   listeners.forEach((fn) => fn());
   if (!samePage) window.scrollTo(0, 0);
 }
 
-/** Where the current entry was opened from, within the app (null after a fresh load or a typed URL). */
-export function previousPath(): string | null {
-  return (history.state as EntryState | null)?.prev ?? null;
+/** The pillar page the current entry was reached from (null after a fresh load or a typed URL). */
+export function pillarPath(): string | null {
+  return entry().pillar ?? null;
 }
 
-/** Back to the page this one was opened from; `fallback` when there is none (opened directly). */
+/** Back to the pillar this page was reached from, in one step; `fallback` when there is none. */
 export function goBack(fallback: string) {
-  if (previousPath()) history.back();
-  else navigate(fallback);
+  const { pillar, pillarDepth, depth = 0 } = entry();
+  if (pillar && pillarDepth != null && pillarDepth < depth) history.go(pillarDepth - depth);
+  else navigate(pillar ?? fallback);
 }
 
 export function usePath(): string {

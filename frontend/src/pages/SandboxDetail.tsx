@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, ApiError, type Sandbox, type SystemInfo } from "../lib/api";
 import { ago, bytes, repoLabel } from "../lib/format";
-import { navigate, previousPath, useQuery, useTitle } from "../lib/router";
+import { navigate, pillarPath, useQuery, useTitle } from "../lib/router";
 import { BackLink } from "../components/BackLink";
 import { noteSandboxOpened } from "../components/SidebarActivity";
 import { usePoll } from "../lib/usePoll";
@@ -83,7 +83,7 @@ export default function SandboxDetail({ id, tab: tabParam }: { id: string; tab: 
     <div className="page page-wide">
       <nav className="crumbs" aria-label="Breadcrumb">
         <BackLink />
-        {previousPath() && previousPath() !== "/" && (
+        {pillarPath() && !["/", "/sandboxes"].includes(new URL(pillarPath()!, location.href).pathname) && (
           <>
             <span className="crumbs-sep" aria-hidden>·</span>
             <a href="/">Sandboxes</a>

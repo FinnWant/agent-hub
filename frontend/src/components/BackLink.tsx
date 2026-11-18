@@ -1,38 +1,23 @@
-import { goBack, match, previousPath } from "../lib/router";
+import { goBack, match, pillarPath } from "../lib/router";
 import { Icon } from "./ui";
 
-const TAB_LABEL: Record<string, string> = {
-  runs: "Runs", changes: "Changes", files: "Files", terminal: "Terminal", preview: "Preview", settings: "Settings",
-};
-
-/** A short name for an in-app path, said from the page at `from`. */
-function label(path: string, from: string): string {
-  const url = new URL(path, location.href);
-  const r = match(url.pathname);
-  const here = match(from);
-  if (r.name === "home") return "Sandboxes";
+/** The name of a pillar page. */
+function label(path: string): string {
+  const r = match(new URL(path, location.href).pathname);
   if (r.name === "needsYou") return "Needs you";
   if (r.name === "audit") return "Audit log";
-  if (r.name === "sandbox") {
-    if (here.name !== "sandbox" || here.id !== r.id) return "the sandbox";
-    const tab = r.tab ?? "runs";
-    const sameTab = (here.tab ?? "runs") === tab;
-    if (sameTab && url.searchParams.get("run")) return "the previous run";
-    if (sameTab && url.searchParams.get("file")) return "the previous file";
-    return TAB_LABEL[tab] ?? "the previous page";
-  }
-  return "the previous page";
+  return "Sandboxes";
 }
 
 /**
- * "Back to …": returns to the page this one was opened from (Needs you, the audit log, another tab,
- * the run you were reading), not always the sandbox list. With no in-app history (opened from a
- * link or a notification) it goes to `fallback`. Visible in the installed app, which has no browser
- * back button.
+ * "Back to …": returns to the pillar page this one was reached from (Sandboxes, Needs you, the
+ * audit log) in one step, skipping the tabs, runs and files opened since. With no in-app history
+ * (opened from a link or a notification) it goes to `fallback`. Visible in the installed app,
+ * which has no browser back button.
  */
 export function BackLink({ fallback = "/", fallbackLabel = "Sandboxes" }: { fallback?: string; fallbackLabel?: string }) {
-  const prev = previousPath();
-  const text = prev ? label(prev, location.pathname) : fallbackLabel;
+  const prev = pillarPath();
+  const text = prev ? label(prev) : fallbackLabel;
   return (
     <a href={prev ?? fallback} className="back-link"
       onClick={(e) => {
@@ -45,8 +30,8 @@ export function BackLink({ fallback = "/", fallbackLabel = "Sandboxes" }: { fall
   );
 }
 
-/** For pages in the main navigation: a back link only when they were opened from another page. */
+/** For pillar pages: a back link only when they were reached from another pillar. */
 export function PageBack() {
-  if (!previousPath()) return null;
+  if (!pillarPath()) return null;
   return <nav className="crumbs" aria-label="Breadcrumb"><BackLink /></nav>;
 }
